@@ -1,9 +1,11 @@
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, io::Write, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use chromiumoxide::{
     Browser, cdp::browser_protocol::network::EventRequestWillBeSent, error::CdpError,
 };
+use futures::future::join_all;
+use itertools::Itertools;
 use scraper::{Element, Html, Selector};
 
 use crate::contracts::{PlayerOption, SeriesKey};
@@ -103,13 +105,24 @@ impl VideoServer {
                 .error_for_status()?
                 .text()
                 .await?;
-            let mut players = get_player_options(response);
-            players.retain(|v| v.server_name=="Filemoon");
-            let Some(mut player) = players.into_iter().next() else {
-                return anyhow::Ok(Vec::new().into())
-            };
-            player.data_vs = self.browser.get_video(&player.data_vs).await?.to_string();
-            anyhow::Ok(vec![player].into())
+            let  players = get_player_options(response);
+            let players_string = players.iter().map(|p| format!("{}: {}", p.server_name,p.data_vs)).join("\n");
+            tracing::info!("For {}:{}:{} got the players:\n{}", series.movie,series.season,series.episode, players_string);
+
+            // players.retain(|v| v.server_name=="Vidmoly" || v.server_name == "Filemoon");
+
+            let players = players.into_iter().map(async |p|  {
+                let url = self.browser.get_video(&p.data_vs).await.inspect_err(|e| {
+                    tracing::warn!("Failed to get the video from server {} for {}: {}", p.server_name,p.data_vs, e);
+                }).ok();
+                url.and_then(|url| Some(PlayerOption {
+                    data_vs: url.to_string(),
+                    server_name: p.server_name
+                }))
+            });
+            let players = join_all(players).await.into_iter().flatten().collect();
+
+            anyhow::Ok(players)
         }).await.map_err(|e| {
             match Arc::try_unwrap(e) {
                 Ok(e) => e,
@@ -163,7 +176,7 @@ fn get_player_options(body: String) -> Vec<PlayerOption> {
 }
 
 pub struct BrowserDiscovery {
-    browser: tokio::sync::Mutex<Browser>,
+    browser: Browser,
 }
 
 impl BrowserDiscovery {
@@ -185,40 +198,47 @@ impl BrowserDiscovery {
                 // TODO: add error handling and reopen the browser connection when this happens
             }
         });
-        Ok(Self {
-            browser: tokio::sync::Mutex::new(browser),
-        })
+        Ok(Self { browser })
     }
     pub async fn get_video(&self, url: &str) -> anyhow::Result<reqwest::Url> {
         use futures::StreamExt;
-        let browser = self.browser.lock().await;
-        let page = browser.new_page(url).await?;
+        let page = self.browser.new_page(url).await?;
 
-        let future = async {
-            let mut requests = page.event_listener::<EventRequestWillBeSent>().await?;
+        let r = {
+            let future = async {
+                let mut requests = page.event_listener::<EventRequestWillBeSent>().await?;
 
-            while let Some(event) = requests.next().await {
-                let url = match event.request.url.parse::<reqwest::Url>() {
-                    Ok(url) => url,
-                    Err(_) => {
+                while let Some(event) = requests.next().await {
+                    let url = match event.request.url.parse::<reqwest::Url>() {
+                        Ok(url) => url,
+                        Err(_) => {
+                            continue;
+                        }
+                    };
+                    let Some(mut path_segments) = url.path_segments() else {
                         continue;
+                    };
+                    let Some(last_part) = path_segments.next_back() else {
+                        continue;
+                    };
+                    if last_part == "master.m3u8" {
+                        return Ok(url);
                     }
-                };
-                let Some(mut path_segments) = url.path_segments() else {
-                    continue;
-                };
-                let Some(last_part) = path_segments.next_back() else {
-                    continue;
-                };
-                if last_part == "master.m3u8" {
-                    return Ok(url);
                 }
+                anyhow::bail!("Failed to find the page");
+            };
+            tokio::pin!(future);
+            let mut r = tokio::time::timeout(Duration::from_secs(3), &mut future)
+                .await
+                .context("Timeout waiting for master.m3u8");
+            if r.is_err() {
+                page.reload().await?.wait_for_navigation().await?;
+                r = tokio::time::timeout(Duration::from_secs(3), &mut future)
+                    .await
+                    .context("Timeout waiting for master.m3u8");
             }
-            anyhow::bail!("Failed to find the page");
+            r
         };
-        let r = tokio::time::timeout(Duration::from_secs(30), future)
-            .await
-            .context("Timeout waiting for master.m3u8");
         page.close().await?;
 
         r?

@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.port);
-    
+
     tracing::info!("Starting the server on port {}", args.port);
     let handle = axum_server::Handle::new();
     let server = tokio::spawn(
