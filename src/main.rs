@@ -48,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     let args = args::Args::parse();
     tracing_subscriber::fmt().init();
+    let config = RustlsConfig::from_pem_file(args.ssl_cert_path, args.ssl_key_path).await?;
     let client = reqwest::Client::new();
     let state = AppState {
         server: VideoServer::new(client.clone(), args.headless_browser).await?,
@@ -73,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.port);
-    let config = RustlsConfig::from_pem_file(args.ssl_cert_path, args.ssl_key_path).await?;
+    
     tracing::info!("Starting the server on port {}", args.port);
     let handle = axum_server::Handle::new();
     let server = tokio::spawn(

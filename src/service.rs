@@ -174,6 +174,8 @@ impl BrowserDiscovery {
 
         if !headless_browser {
             config = config.with_head();
+        } else {
+            config = config.new_headless_mode();
         }
         let (browser, mut handler) =
             Browser::launch(config.build().map_err(|e| anyhow::anyhow!("{e}"))?).await?;
