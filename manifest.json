@@ -1,0 +1,16 @@
+{
+    "id": "org.stremio.helloworld",
+    "version": "1.0.0",
+    "name": "Hello World Addon",
+    "description": "Sample addon providing a few public domain movies",
+    "resources": [
+        "stream"
+    ],
+    "types": [
+        "series"
+    ],
+    "catalogs": [],
+    "idPrefixes": [
+        "tt"
+    ]
+}
