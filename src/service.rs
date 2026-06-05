@@ -1,7 +1,13 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use anyhow::Context;
-use chromiumoxide::{Browser, cdp::browser_protocol::network::EventRequestWillBeSent};
+use chromiumoxide::{
+    Browser,
+    cdp::browser_protocol::{
+        network::EventRequestWillBeSent,
+        target::{CreateTargetParams, CreateTargetParamsBuilder},
+    },
+};
 use futures::future::join_all;
 use itertools::Itertools;
 use scraper::{Element, Html, Selector};
@@ -103,22 +109,22 @@ impl VideoServer {
                 .error_for_status()?
                 .text()
                 .await?;
-            let  players = get_player_options(response);
+            let players = get_player_options(response);
             let players_string = players.iter().map(|p| format!("{}: {}", p.server_name,p.data_vs)).join("\n");
             tracing::info!("For {}:{}:{} got the players:\n{}", series.movie,series.season,series.episode, players_string);
 
-            // players.retain(|v| v.server_name=="Vidmoly" || v.server_name == "Filemoon");
 
             let players = players.into_iter().map(async |p|  {
                 let url = self.browser.get_video(&p.data_vs).await.inspect_err(|e| {
                     tracing::warn!("Failed to get the video from server {} for {}: {}", p.server_name,p.data_vs, e);
                 }).ok();
-                url.map(|url| PlayerOption {
-                    data_vs: url.to_string(),
+                PlayerOption {
+                    url: url.map(|url| url.to_string()),
+                    data_vs: p.data_vs,
                     server_name: p.server_name
-                })
+                }
             });
-            let players = join_all(players).await.into_iter().flatten().collect();
+            let players = join_all(players).await.into_iter().collect();
 
             anyhow::Ok(players)
         }).await.map_err(|e| {
@@ -166,6 +172,7 @@ fn get_player_options(body: String) -> Vec<PlayerOption> {
                 .text()
                 .next()?;
             Some(PlayerOption {
+                url: None,
                 data_vs: s.attr("data-vs")?.to_owned(),
                 server_name: text.to_owned(),
             })
@@ -200,12 +207,14 @@ impl BrowserDiscovery {
     }
     pub async fn get_video(&self, url: &str) -> anyhow::Result<reqwest::Url> {
         use futures::StreamExt;
+
         let page = self.browser.new_page(url).await?;
 
-        let r = {
-            let future = async {
-                let mut requests = page.event_listener::<EventRequestWillBeSent>().await?;
-
+        let r = async {
+            let mut requests = page.event_listener::<EventRequestWillBeSent>().await?;
+            page.wait_for_navigation().await?;
+            page.reload().await?;
+            let player_future = async {
                 while let Some(event) = requests.next().await {
                     let url = match event.request.url.parse::<reqwest::Url>() {
                         Ok(url) => url,
@@ -225,20 +234,33 @@ impl BrowserDiscovery {
                 }
                 anyhow::bail!("Failed to find the page");
             };
-            tokio::pin!(future);
-            let mut r = tokio::time::timeout(Duration::from_secs(1), &mut future)
-                .await
-                .context("Timeout waiting for master.m3u8");
-            if r.is_err() {
-                page.reload().await?;
-                r = tokio::time::timeout(Duration::from_secs(3), &mut future)
-                    .await
-                    .context("Timeout waiting for master.m3u8");
-            }
-            r
-        };
-        page.close().await?;
 
-        r?
+            let test_error = async {
+                let page_html = page.content().await?.to_lowercase();
+                if page_html.contains("security verification") {
+                    anyhow::bail!("Page contains security validation");
+                }
+                if page_html.contains("not found") {
+                    anyhow::bail!("The url was not found")
+                }
+                anyhow::Ok(())
+            };
+
+            tokio::select! {
+                biased;
+                r = player_future => {
+                    r
+                }
+                Err(e) = test_error => {
+                    Err(e)
+                }
+                () = tokio::time::sleep(Duration::from_secs(3)) => {
+                    anyhow::bail!("Timeout waiting for master.m3u8")
+                }
+            }
+        };
+        let r = r.await;
+        page.close().await?;
+        r
     }
 }

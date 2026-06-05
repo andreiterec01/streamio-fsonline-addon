@@ -1,6 +1,6 @@
 {
     "id": "org.stremio.fsonline",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "name": "FSonline",
     "description": "FSonline addon to get only the series for now",
     "resources": [

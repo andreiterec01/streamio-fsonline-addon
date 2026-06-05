@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
     let handle = axum_server::Handle::new();
     let server = tokio::spawn(
         axum_server::bind(SocketAddr::V4(addr))
-            .acceptor(RustlsAcceptor::new(config))
+            // .acceptor(RustlsAcceptor::new(config))
             .handle(handle.clone())
             .serve(router.into_make_service()),
     );

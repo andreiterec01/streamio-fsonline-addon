@@ -1,9 +1,9 @@
-use std::sync::Arc;
-
 use axum::{
     Form, Json, Router,
     extract::{Path, State},
 };
+use serde::Serialize;
+use std::sync::Arc;
 
 use crate::{
     AppState,
@@ -27,15 +27,55 @@ async fn get_movie_url(
     Ok(Json(r))
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 pub struct SeriesResponse {
     streams: Vec<Stream>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BehaviourHints {
+    not_web_ready: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Stream {
+    name: &'static str,
     title: String,
-    url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    behavior_hints: Option<BehaviourHints>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    external_url: Option<String>,
+}
+
+impl Stream {
+    fn url(url: String, server_name: String) -> Stream {
+        Stream {
+            name: "FSonline",
+            title: server_name,
+            url: Some(url),
+            behavior_hints: Some(BehaviourHints {
+                not_web_ready: true,
+            }),
+            external_url: None,
+        }
+    }
+
+    fn external_url(external_url: String, server_name: &str) -> Stream {
+        Stream {
+            name: "FSonline browser",
+            title: format!(
+                "{} Server\nThis will play in the browser\n{}",
+                server_name, external_url
+            ),
+            url: None,
+            behavior_hints: None,
+            external_url: Some(external_url),
+        }
+    }
 }
 
 async fn series(
@@ -51,12 +91,14 @@ async fn series(
             episode: imdb_id.episode,
         })
         .await?;
+
     let streams = r
         .iter()
-        .map(|r| Stream {
-            title: r.server_name.to_owned(),
-            url: r.data_vs.clone(),
-        })
+        .flat_map(|r| Some(Stream::url(r.url.clone()?, r.server_name.clone())))
+        .chain(
+            r.iter()
+                .map(|r| Stream::external_url(r.data_vs.clone(), &r.server_name)),
+        )
         .collect();
     Ok(Json(SeriesResponse { streams }))
 }

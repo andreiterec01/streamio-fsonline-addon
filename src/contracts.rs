@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerOption {
-    pub data_vs: String,
     pub server_name: String,
+    pub data_vs: String,
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Deserialize)]
