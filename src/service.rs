@@ -1,18 +1,13 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use anyhow::Context;
-use chromiumoxide::{
-    Browser,
-    cdp::browser_protocol::{
-        network::EventRequestWillBeSent,
-        target::{CreateTargetParams, CreateTargetParamsBuilder},
-    },
-};
+use chromiumoxide::{Browser, cdp::browser_protocol::network::EventRequestWillBeSent};
 use futures::future::join_all;
 use itertools::Itertools;
 use scraper::{Element, Html, Selector};
+use serde::Serialize;
 
-use crate::contracts::{PlayerOption, SeriesKey};
+use crate::contracts::{PlayerData, PlayerOption, SeriesKey};
 
 #[derive(Clone)]
 pub struct ImdbService {
@@ -67,7 +62,7 @@ impl ImdbService {
 
 #[derive(Clone)]
 pub struct VideoServer {
-    cache: moka::future::Cache<SeriesKey, Arc<[PlayerOption]>>,
+    cache: moka::future::Cache<SeriesKey, Arc<[PlayerData]>>,
     browser: Arc<BrowserDiscovery>,
     client: reqwest::Client,
 }
@@ -88,7 +83,7 @@ impl VideoServer {
         })
     }
 
-    pub async fn get(&self, series: &SeriesKey) -> anyhow::Result<Arc<[PlayerOption]>> {
+    pub async fn get(&self, series: &SeriesKey) -> anyhow::Result<Arc<[PlayerData]>> {
         let players = self.cache.try_get_with_by_ref(series, async {
             let SeriesKey { movie, season, episode } = series;
             let movie = normalize_movie_name(movie);
@@ -110,18 +105,18 @@ impl VideoServer {
                 .text()
                 .await?;
             let players = get_player_options(response);
-            let players_string = players.iter().map(|p| format!("{}: {}", p.server_name,p.data_vs)).join("\n");
+            let players_string = players.iter().map(|p| format!("{}: {}", p.server_name,p.iframe_player)).join("\n");
             tracing::info!("For {}:{}:{} got the players:\n{}", series.movie,series.season,series.episode, players_string);
 
 
             let players = players.into_iter().map(async |p|  {
-                let url = self.browser.get_video(&p.data_vs).await.inspect_err(|e| {
-                    tracing::warn!("Failed to get the video from server {} for {}: {}", p.server_name,p.data_vs, e);
-                }).ok();
-                PlayerOption {
-                    url: url.map(|url| url.to_string()),
-                    data_vs: p.data_vs,
-                    server_name: p.server_name
+                let data = self.browser.get_video(&p.iframe_player).await.inspect_err(|e| {
+                    tracing::warn!("Failed to get the video from server {} for {}: {}", p.server_name,p.iframe_player, e);
+                }).ok().unwrap_or_default();
+                PlayerData {
+                    data,
+                    iframe_player: p.iframe_player.into(),
+                    server_name: p.server_name.into()
                 }
             });
             let players = join_all(players).await.into_iter().collect();
@@ -172,12 +167,17 @@ fn get_player_options(body: String) -> Vec<PlayerOption> {
                 .text()
                 .next()?;
             Some(PlayerOption {
-                url: None,
-                data_vs: s.attr("data-vs")?.to_owned(),
+                iframe_player: s.attr("data-vs")?.to_owned(),
                 server_name: text.to_owned(),
             })
         })
         .collect::<Vec<_>>()
+}
+
+#[derive(Debug, Default, Serialize, Clone)]
+pub struct VideoAndSubtitles {
+    pub video: Option<Arc<str>>,
+    pub subtitles: Arc<[Arc<str>]>,
 }
 
 pub struct BrowserDiscovery {
@@ -205,17 +205,31 @@ impl BrowserDiscovery {
         });
         Ok(Self { browser })
     }
-    pub async fn get_video(&self, url: &str) -> anyhow::Result<reqwest::Url> {
+    pub async fn get_video(&self, url: &str) -> anyhow::Result<VideoAndSubtitles> {
         use futures::StreamExt;
 
         let page = self.browser.new_page(url).await?;
 
         let r = async {
             let mut requests = page.event_listener::<EventRequestWillBeSent>().await?;
-            page.wait_for_navigation().await?;
-            page.reload().await?;
+
+            tokio::time::timeout(Duration::from_secs(10), async {
+                page.wait_for_navigation().await?;
+                page.reload().await?;
+                page.wait_for_navigation().await
+            })
+            .await
+            .context("Timeout while waiting for the page to reload")??;
+
+            let mut elapsed_at = tokio::time::Instant::now() + Duration::from_secs(3);
             let player_future = async {
-                while let Some(event) = requests.next().await {
+                let mut subtitles = Vec::new();
+                let mut video = None;
+                while let Some(event) = tokio::time::timeout_at(elapsed_at, requests.next())
+                    .await
+                    .ok()
+                    .and_then(|x| x)
+                {
                     let url = match event.request.url.parse::<reqwest::Url>() {
                         Ok(url) => url,
                         Err(_) => {
@@ -229,10 +243,29 @@ impl BrowserDiscovery {
                         continue;
                     };
                     if last_part == "master.m3u8" {
-                        return Ok(url);
+                        let was_empty = video.is_none();
+                        video = Some(url.to_string().into());
+                        if was_empty && !subtitles.is_empty() {
+                            // if we have everything, wait only another 0.2 seconds to make sure we get all the subtitles
+                            elapsed_at = tokio::time::Instant::now() + Duration::from_secs_f32(0.2);
+                        }
+                    } else if last_part.split('.').next_back() == Some("vtt") {
+                        let was_empty = subtitles.is_empty();
+                        subtitles.push(url.to_string().into());
+                        if was_empty && video.is_some() {
+                            // if we have everything, wait only another 0.2 seconds to make sure we get all the subtitles
+                            elapsed_at = tokio::time::Instant::now() + Duration::from_secs_f32(0.2);
+                        }
                     }
                 }
-                anyhow::bail!("Failed to find the page");
+
+                if subtitles.is_empty() && video.is_none() {
+                    anyhow::bail!("Didn't find the video or the subtitles");
+                }
+                Ok(VideoAndSubtitles {
+                    video,
+                    subtitles: subtitles.into(),
+                })
             };
 
             let test_error = async {
@@ -253,9 +286,6 @@ impl BrowserDiscovery {
                 }
                 Err(e) = test_error => {
                     Err(e)
-                }
-                () = tokio::time::sleep(Duration::from_secs(3)) => {
-                    anyhow::bail!("Timeout waiting for master.m3u8")
                 }
             }
         };

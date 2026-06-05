@@ -20,12 +20,18 @@ mod routes;
 mod service;
 
 #[derive(Clone)]
-pub struct IndexHtml(pub Arc<str>);
+pub struct UsesHttps(pub bool);
+
+#[derive(Clone)]
+pub struct Host(pub Arc<str>);
 
 #[derive(FromRef, Clone)]
 pub struct AppState {
     server: VideoServer,
     imdb_server: ImdbService,
+    client: reqwest::Client,
+    uses_https: UsesHttps,
+    host: Host,
 }
 
 #[tokio::main]
@@ -34,11 +40,20 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     let args = args::Args::parse();
     tracing_subscriber::fmt().init();
-    let config = RustlsConfig::from_pem_file(args.ssl_cert_path, args.ssl_key_path).await?;
+    let config = match (args.ssl_cert_path, args.ssl_key_path) {
+        (Some(cert_path), Some(key_path)) => {
+            let config = RustlsConfig::from_pem_file(cert_path, key_path).await?;
+            Some(config)
+        }
+        (_, _) => None,
+    };
     let client = reqwest::Client::new();
     let state = AppState {
         server: VideoServer::new(client.clone(), args.headless_browser).await?,
-        imdb_server: ImdbService::new(client),
+        imdb_server: ImdbService::new(client.clone()),
+        uses_https: UsesHttps(config.is_some()),
+        client,
+        host: Host(args.host.into()),
     };
 
     let cors_layer = CorsLayer::new()
@@ -63,12 +78,19 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting the server on port {}", args.port);
     let handle = axum_server::Handle::new();
-    let server = tokio::spawn(
-        axum_server::bind(SocketAddr::V4(addr))
-            // .acceptor(RustlsAcceptor::new(config))
-            .handle(handle.clone())
-            .serve(router.into_make_service()),
-    );
+    let server = axum_server::bind(SocketAddr::V4(addr)).handle(handle.clone());
+
+    let server = tokio::spawn(async move {
+        match config {
+            Some(config) => {
+                server
+                    .acceptor(RustlsAcceptor::new(config))
+                    .serve(router.into_make_service())
+                    .await
+            }
+            None => server.serve(router.into_make_service()).await,
+        }
+    });
     tokio::pin!(server);
     tokio::select! {
         r = &mut server => {

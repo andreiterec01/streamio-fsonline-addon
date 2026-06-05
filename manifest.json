@@ -4,7 +4,8 @@
     "name": "FSonline",
     "description": "FSonline addon to get only the series for now",
     "resources": [
-        "stream"
+        "stream",
+        "subtitles"
     ],
     "types": [
         "series"

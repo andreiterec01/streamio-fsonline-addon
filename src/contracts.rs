@@ -3,12 +3,75 @@ use std::{fmt::Display, str::FromStr, sync::Arc};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::service::VideoAndSubtitles;
+
+#[derive(Serialize)]
+pub struct Subtitle {
+    /**
+     * Unique identifier for each subtitle, if you have more than one subtitle with the same language, the id will differentiate them.
+     */
+    id: uuid::Uuid,
+    /**
+     * Url to the subtitle file.
+     */
+    url: String,
+    /**
+     * Language code for the subtitle, if a valid ISO 639-2 code is not sent, the text of this value will be used instead.
+     */
+    lang: &'static str,
+}
+
+impl Subtitle {
+    pub fn detect_from_url(uses_https: bool, host: &str, url: &str) -> Self {
+        let Some(last) = url.split('/').next_back() else {
+            return Self::unrecognized(uses_https, host, url);
+        };
+        let name = last.to_lowercase();
+        if name.ends_with("romanian.vtt") {
+            Self::romanian(uses_https, host, url)
+        } else if name.contains("english.vtt") {
+            Self::english(uses_https, host, url)
+        } else {
+            tracing::warn!("Failed to categorize subtitle {}", url);
+            Self::unrecognized(uses_https, host, url)
+        }
+    }
+
+    pub fn romanian(uses_https: bool, host: &str, url: &str) -> Self {
+        Self::subtitle(uses_https, host, url, "ron")
+    }
+
+    pub fn english(uses_https: bool, host: &str, url: &str) -> Self {
+        Self::subtitle(uses_https, host, url, "eng")
+    }
+
+    pub fn unrecognized(uses_https: bool, host: &str, url: &str) -> Self {
+        Self::subtitle(uses_https, host, url, "_unrecognized")
+    }
+
+    pub fn subtitle(uses_https: bool, host: &str, url: &str, lang: &'static str) -> Self {
+        let protocol = if uses_https { "https" } else { "http" };
+        Self {
+            id: uuid::Uuid::new_v4(),
+            url: format!("{protocol}://{host}/v1/api/subtitles/redirect?url={url}"),
+            lang,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerOption {
     pub server_name: String,
-    pub data_vs: String,
-    pub url: Option<String>,
+    pub iframe_player: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerData {
+    pub server_name: Arc<str>,
+    pub iframe_player: Arc<str>,
+    pub data: VideoAndSubtitles,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Deserialize)]

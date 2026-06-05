@@ -14,7 +14,7 @@ futures = "0.3.32"
 hyper = "1.10.1"
 itertools = "0.14.0"
 moka = { version = "0.12.15", features = ["future"] }
-reqwest = { version = "0.13.4", features = ["form", "gzip", "json"] }
+reqwest = { version = "0.13.4", features = ["form", "gzip", "json", "stream"] }
 scraper = "0.27.0"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 thiserror = "2.0.18"
@@ -23,3 +23,4 @@ tower = "0.5.3"
 tower-http = { version = "0.6.11", features = ["cors", "fs"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.23.2", features = ["serde", "v4"] }
