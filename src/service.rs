@@ -1,8 +1,8 @@
-use std::{collections::BTreeSet, io::Write, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use chromiumoxide::{
-    Browser, cdp::browser_protocol::network::EventRequestWillBeSent, error::CdpError,
+    Browser, cdp::browser_protocol::network::EventRequestWillBeSent
 };
 use futures::future::join_all;
 use itertools::Itertools;
@@ -79,7 +79,7 @@ impl VideoServer {
             client,
             browser: Arc::new(BrowserDiscovery::new(headless_browser).await?),
             cache: moka::future::CacheBuilder::new(100_000)
-                .time_to_live(Duration::from_secs(3600))
+                .time_to_live(Duration::from_secs(3600 * 4))
                 .build(),
         })
     }
@@ -228,11 +228,11 @@ impl BrowserDiscovery {
                 anyhow::bail!("Failed to find the page");
             };
             tokio::pin!(future);
-            let mut r = tokio::time::timeout(Duration::from_secs(3), &mut future)
+            let mut r = tokio::time::timeout(Duration::from_secs(1), &mut future)
                 .await
                 .context("Timeout waiting for master.m3u8");
             if r.is_err() {
-                page.reload().await?.wait_for_navigation().await?;
+                page.reload().await?;
                 r = tokio::time::timeout(Duration::from_secs(3), &mut future)
                     .await
                     .context("Timeout waiting for master.m3u8");

@@ -8,7 +8,7 @@ use axum::{
 use crate::{
     AppState,
     contracts::{ImdbSeries, PlayerOption, SeriesKey},
-    error::{WebError, WebResult},
+    error::{WebResult},
     service::{ImdbService, VideoServer},
 };
 
