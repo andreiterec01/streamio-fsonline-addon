@@ -20,29 +20,52 @@ pub struct Subtitle {
      */
     lang: &'static str,
 }
+/*
 
+
+
+
+
+
+
+
+
+
+*/
 impl Subtitle {
     pub fn detect_from_url(uses_https: bool, host: &str, url: &str) -> Self {
+        static CORELATIONS: &[(&'static str, &'static str)] = &[
+            ("romanian.vtt", "ron"),
+            ("english.vtt", "eng"),
+            ("finnish.vtt", "fin"),
+            ("swedish.vtt", "swe"),
+            ("norwegian.vtt", "nno"),
+            ("french.vtt", "fra"),
+            ("indonesian.vtt", "ind"),
+            ("hungarian.vtt", "hun"),
+            ("portuguese.vtt", "por"),
+            ("czech.vtt", "ces"),
+            ("german.vtt", "deu"),
+            ("polish.vtt", "pol"),
+            ("greek.vtt", "ell"),
+            ("italian.vtt", "ita"),
+            ("danish.vtt", "dan"),
+            ("turkish.vtt", "tur"),
+            ("spanish.vtt", "spa"),
+            ("arabic.vtt", "ara"),
+        ];
         let Some(last) = url.split('/').next_back() else {
             return Self::unrecognized(uses_https, host, url);
         };
         let name = last.to_lowercase();
-        if name.ends_with("romanian.vtt") {
-            Self::romanian(uses_https, host, url)
-        } else if name.contains("english.vtt") {
-            Self::english(uses_https, host, url)
-        } else {
-            tracing::warn!("Failed to categorize subtitle {}", url);
-            Self::unrecognized(uses_https, host, url)
+        for (corelation, lang) in CORELATIONS {
+            if name.ends_with(corelation) {
+                return Self::subtitle(uses_https, host, url, lang);
+            }
         }
-    }
 
-    pub fn romanian(uses_https: bool, host: &str, url: &str) -> Self {
-        Self::subtitle(uses_https, host, url, "ron")
-    }
-
-    pub fn english(uses_https: bool, host: &str, url: &str) -> Self {
-        Self::subtitle(uses_https, host, url, "eng")
+        tracing::warn!("Failed to categorize subtitle {}", url);
+        Self::unrecognized(uses_https, host, url)
     }
 
     pub fn unrecognized(uses_https: bool, host: &str, url: &str) -> Self {
