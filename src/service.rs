@@ -1,9 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use anyhow::Context;
-use chromiumoxide::{
-    Browser, cdp::browser_protocol::network::EventRequestWillBeSent
-};
+use chromiumoxide::{Browser, cdp::browser_protocol::network::EventRequestWillBeSent};
 use futures::future::join_all;
 use itertools::Itertools;
 use scraper::{Element, Html, Selector};
@@ -115,10 +113,10 @@ impl VideoServer {
                 let url = self.browser.get_video(&p.data_vs).await.inspect_err(|e| {
                     tracing::warn!("Failed to get the video from server {} for {}: {}", p.server_name,p.data_vs, e);
                 }).ok();
-                url.and_then(|url| Some(PlayerOption {
+                url.map(|url| PlayerOption {
                     data_vs: url.to_string(),
                     server_name: p.server_name
-                }))
+                })
             });
             let players = join_all(players).await.into_iter().flatten().collect();
 

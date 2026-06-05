@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use axum::{
     Form, Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, State},
 };
 
 use crate::{
     AppState,
     contracts::{ImdbSeries, PlayerOption, SeriesKey},
-    error::{WebResult},
+    error::WebResult,
     service::{ImdbService, VideoServer},
 };
 

@@ -1,28 +1,14 @@
 use std::{
-    collections::BTreeSet,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    ops::Deref,
     sync::Arc,
     time::Duration,
 };
 
-use anyhow::Context;
-use axum::{
-    Router,
-    extract::{FromRef, State},
-    response::IntoResponse,
-};
+use axum::extract::FromRef;
 use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
-use chromiumoxide::{Browser, cdp::browser_protocol::network::EventRequestWillBeSent};
 use clap::Parser;
-use html5ever::{interface::TreeSink, parse_document, tendril::TendrilSink};
-use itertools::Itertools;
-use scraper::{Element, Html, Selector};
 use tower::ServiceBuilder;
-use tower_http::{
-    cors::CorsLayer,
-    services::{ServeDir, ServeFile},
-};
+use tower_http::{cors::CorsLayer, services::ServeFile};
 
 use crate::service::{ImdbService, VideoServer};
 

@@ -11,7 +11,6 @@ chromiumoxide = "0.9.1"
 clap = { version = "4.6.1", features = ["derive", "env"] }
 dotenvy = "0.15.7"
 futures = "0.3.32"
-html5ever = "0.39.0"
 hyper = "1.10.1"
 itertools = "0.14.0"
 moka = { version = "0.12.15", features = ["future"] }

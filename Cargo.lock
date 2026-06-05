@@ -762,7 +762,6 @@ dependencies = [
  "clap",
  "dotenvy",
  "futures",
- "html5ever",
  "hyper",
  "itertools",
  "moka",
