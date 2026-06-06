@@ -8,9 +8,9 @@ use std::{ops::Deref, sync::Arc};
 
 use crate::{
     AppState, UsesHttps,
-    contracts::{ImdbSeries, PlayerData, SeriesKey, Subtitle},
+    contracts::{ImdbSeries, MovieKey, MovieOrSeriesDataKey, PlayerData, Subtitle},
     error::WebResult,
-    service::{ImdbService, VideoServer},
+    service::{ImdbService, MovieData, VideoServer},
 };
 
 pub fn routes() -> Router<AppState> {
@@ -18,13 +18,15 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/api/season", get(get_movie_url))
         .route("/stream/series/{imdb_id}", get(series))
+        .route("/stream/movie/{imdb_id}", get(series))
         .route("/subtitles/series/{imdb_id}/{filename}", get(subtitles))
+        .route("/subtitles/movie/{imdb_id}/{filename}", get(subtitles))
         .route("/v1/api/subtitles/redirect", get(redirect_subtitles))
 }
 
 async fn get_movie_url(
     State(movie): State<VideoServer>,
-    Form(series): Form<SeriesKey>,
+    Form(series): Form<MovieKey>,
 ) -> WebResult<Json<Arc<[PlayerData]>>> {
     let r = movie.get(&series).await?;
     Ok(Json(r))
@@ -103,12 +105,20 @@ async fn series(
     State(crate::Host(host)): State<crate::Host>,
     imdb_id: Path<ImdbSeries>,
 ) -> WebResult<Json<SeriesResponse>> {
-    let movie_name = imdb_service.get(imdb_id.series_id).await?;
+    let MovieData {
+        movie_name,
+        release_year,
+    } = imdb_service
+        .get(imdb_id.imdb_id, imdb_id.is_series())
+        .await?;
+    let data = match imdb_id.series_data {
+        Some(data) => MovieOrSeriesDataKey::Series(data),
+        None => MovieOrSeriesDataKey::Movie { release_year },
+    };
     let r = movie
-        .get(&SeriesKey {
+        .get(&MovieKey {
             movie: movie_name,
-            season: imdb_id.season,
-            episode: imdb_id.episode,
+            data,
         })
         .await?;
 
@@ -143,12 +153,20 @@ async fn subtitles(
     State(crate::Host(host)): State<crate::Host>,
     Path((imdb_id, _)): Path<(ImdbSeries, String)>,
 ) -> WebResult<Json<SubtitlesList>> {
-    let movie_name = imdb_service.get(imdb_id.series_id).await?;
+    let MovieData {
+        movie_name,
+        release_year,
+    } = imdb_service
+        .get(imdb_id.imdb_id, imdb_id.is_series())
+        .await?;
+    let data = match imdb_id.series_data {
+        Some(data) => MovieOrSeriesDataKey::Series(data),
+        None => MovieOrSeriesDataKey::Movie { release_year },
+    };
     let r = movie
-        .get(&SeriesKey {
+        .get(&MovieKey {
             movie: movie_name,
-            season: imdb_id.season,
-            episode: imdb_id.episode,
+            data,
         })
         .await?;
 

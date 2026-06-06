@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{Json, response::IntoResponse};
 use serde::Serialize;
 
@@ -17,7 +19,7 @@ struct ErrorResponse {
 
 impl IntoResponse for WebError {
     fn into_response(self) -> axum::response::Response {
-        let (status, error) = match self {
+        let (status, error) = match &self {
             Self::Other(error) => (
                 hyper::StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorResponse {
@@ -26,6 +28,9 @@ impl IntoResponse for WebError {
                 },
             ),
         };
-        (status, Json(error)).into_response()
+
+        let mut response = (status, Json(error)).into_response();
+        response.extensions_mut().insert(Arc::new(self));
+        response
     }
 }

@@ -2,17 +2,24 @@ use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use chromiumoxide::{Browser, cdp::browser_protocol::network::EventRequestWillBeSent};
+use chrono::{DateTime, Datelike, Utc};
 use futures::future::join_all;
 use itertools::Itertools;
 use scraper::{Element, Html, Selector};
 use serde::Serialize;
 
-use crate::contracts::{PlayerData, PlayerOption, SeriesKey};
+use crate::contracts::{MovieKey, PlayerData, PlayerOption, SeriesData};
+
+#[derive(Clone)]
+pub struct MovieData {
+    pub movie_name: Arc<str>,
+    pub release_year: u16,
+}
 
 #[derive(Clone)]
 pub struct ImdbService {
     client: reqwest::Client,
-    imbp_to_movie_name_cache: moka::future::Cache<u64, Arc<str>>,
+    imbp_to_movie_name_cache: moka::future::Cache<u64, MovieData>,
 }
 
 impl ImdbService {
@@ -23,30 +30,53 @@ impl ImdbService {
         }
     }
 
-    pub async fn get(&self, series_id: u64) -> anyhow::Result<Arc<str>> {
+    pub async fn get(&self, imdb_id: u64, is_series: bool) -> anyhow::Result<MovieData> {
         #[derive(serde::Deserialize)]
         struct Root {
             meta: MetaResponse,
         }
+
         #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        pub enum ReleasedValue {
+            Released(DateTime<Utc>),
+            ReleaseInfo(String),
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
         struct MetaResponse {
             name: String,
+            #[serde(flatten)]
+            released: ReleasedValue,
         }
 
         let r = self
             .imbp_to_movie_name_cache
-            .try_get_with(series_id, async {
+            .try_get_with(imdb_id, async {
+                let path = if is_series { "series" } else { "movie" };
                 let response: Root = self
                     .client
-                    .get(format!(
-                        "https://v3-cinemeta.strem.io/meta/series/tt{series_id}.json"
-                    ))
+                    .get(dbg!(format!(
+                        "https://v3-cinemeta.strem.io/meta/{path}/tt{imdb_id}.json"
+                    )))
                     .send()
                     .await?
                     .error_for_status()?
                     .json()
                     .await?;
-                Ok(response.meta.name.into())
+                let release_year: u16 = match response.meta.released {
+                    ReleasedValue::ReleaseInfo(year) => {
+                        year.parse().context("Invalid release year")?
+                    }
+                    ReleasedValue::Released(released) => {
+                        released.year().try_into().context("Invalid release year")?
+                    }
+                };
+                let data = MovieData {
+                    movie_name: response.meta.name.into(),
+                    release_year,
+                };
+                Ok(data)
             })
             .await
             .map_err(|e| match Arc::try_unwrap(e) {
@@ -62,7 +92,7 @@ impl ImdbService {
 
 #[derive(Clone)]
 pub struct VideoServer {
-    cache: moka::future::Cache<SeriesKey, Arc<[PlayerData]>>,
+    cache: moka::future::Cache<MovieKey, Arc<[PlayerData]>>,
     browser: Arc<BrowserDiscovery>,
     client: reqwest::Client,
 }
@@ -83,13 +113,24 @@ impl VideoServer {
         })
     }
 
-    pub async fn get(&self, series: &SeriesKey) -> anyhow::Result<Arc<[PlayerData]>> {
-        let players = self.cache.try_get_with_by_ref(series, async {
-            let SeriesKey { movie, season, episode } = series;
+    pub async fn get(&self, movie: &MovieKey) -> anyhow::Result<Arc<[PlayerData]>> {
+        let players = self.cache.try_get_with_by_ref(movie, async {
+            let MovieKey { movie, data } = movie;
             let movie = normalize_movie_name(movie);
-            let initial_url = format!(
-                "https://www3.fsonline.app/episoade/{movie}-sezonul-{season}-episodul-{episode}/"
-            );
+
+            let initial_url = match data {
+                crate::contracts::MovieOrSeriesDataKey::Movie { release_year } => {
+                    format!(
+                        "https://www3.fsonline.app/film/{movie}-{release_year}/"
+                    )
+                },
+                crate::contracts::MovieOrSeriesDataKey::Series(SeriesData { season, episode }) => {
+                    format!(
+                        "https://www3.fsonline.app/episoade/{movie}-sezonul-{season}-episodul-{episode}/"
+                    )
+                }
+            };
+
 
             let response = self.client.get(initial_url).send().await?.error_for_status()?;
             let body = response.text().await?;
@@ -106,7 +147,7 @@ impl VideoServer {
                 .await?;
             let players = get_player_options(response);
             let players_string = players.iter().map(|p| format!("{}: {}", p.server_name,p.iframe_player)).join("\n");
-            tracing::info!("For {}:{}:{} got the players:\n{}", series.movie,series.season,series.episode, players_string);
+            tracing::info!("For {} got the players:\n{}", movie, players_string);
 
 
             let players = players.into_iter().map(async |p|  {

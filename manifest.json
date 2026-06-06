@@ -1,14 +1,15 @@
 {
     "id": "org.stremio.fsonline",
-    "version": "1.0.2",
+    "version": "2.0.0",
     "name": "FSonline",
-    "description": "FSonline addon to get only the series for now",
+    "description": "Watch movies, series and get subtitles from fsonline servers",
     "resources": [
         "stream",
         "subtitles"
     ],
     "types": [
-        "series"
+        "series",
+        "movie"
     ],
     "catalogs": [],
     "idPrefixes": [
