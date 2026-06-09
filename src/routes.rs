@@ -2,9 +2,9 @@ use axum::{
     Form, Json, Router,
     extract::{Path, Query, State},
 };
-use itertools::Itertools;
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use std::{ops::Deref, str::FromStr, sync::Arc};
+use std::{ops::Deref, sync::Arc};
 
 use crate::{
     AppState, UsesHttps,
@@ -104,7 +104,7 @@ async fn series(
     State(UsesHttps(uses_https)): State<UsesHttps>,
     State(crate::Host(host)): State<crate::Host>,
     imdb_id: Path<ImdbSeries>,
-) -> WebResult<(hyper::HeaderMap, Json<SeriesResponse>)> {
+) -> WebResult<Json<SeriesResponse>> {
     let MovieData {
         movie_name,
         release_year,
@@ -138,14 +138,7 @@ async fn series(
                 .map(|r| Stream::external_url(r.iframe_player.clone(), &r.server_name)),
         )
         .collect();
-
-    let header_map = [(
-        hyper::header::CONTENT_DISPOSITION,
-        "filename=\"My movie.m3u8\"".parse().unwrap(),
-    )]
-    .into_iter()
-    .collect();
-    Ok((header_map, Json(SeriesResponse { streams })))
+    Ok(Json(SeriesResponse { streams }))
 }
 
 #[derive(Serialize)]
@@ -194,24 +187,14 @@ struct SubtitleQuery {
     url: String,
 }
 
-struct SRTTime(std::time::Duration);
-
-impl std::fmt::Display for SRTTime {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let full_seconds = self.0.as_secs();
-        let hour = full_seconds / 3600;
-        let minutes = full_seconds % 3600 / 60;
-        let seconds = full_seconds % 60;
-        let miliseconds = self.0.subsec_millis();
-        write!(f, "{hour:02}:{minutes:02}:{seconds:02},{miliseconds:03}")
-    }
-}
-
 // TODO: is dangerous to make a request where the user wants. I should use the id of the movie and use the cache to get the subtitle.
 async fn redirect_subtitles(
     State(client): State<reqwest::Client>,
     Query(SubtitleQuery { url }): Query<SubtitleQuery>,
-) -> WebResult<(hyper::HeaderMap, String)> {
+) -> WebResult<(
+    hyper::HeaderMap,
+    StreamMapper<impl futures::stream::Stream<Item = std::io::Result<axum::body::Bytes>>>,
+)> {
     let response = client
         .get(url)
         .send()
@@ -219,35 +202,25 @@ async fn redirect_subtitles(
         .map_err(anyhow::Error::from)?
         .error_for_status()
         .map_err(anyhow::Error::from)?
-        // TODO: we should check the return size and limit this
-        .text()
-        .await
-        .map_err(anyhow::Error::from)?;
-    let vtt = vtt::WebVtt::from_str(&response).unwrap();
-    drop(response);
-    let srt = vtt
-        .cues
-        .into_iter()
-        .enumerate()
-        .map(|(index, cue)| {
-            let start = SRTTime(cue.start.as_duration());
-            let end = SRTTime(cue.end.as_duration());
-            let payload = cue.payload;
-            format!("{count}\n{start} --> {end}\n{payload}", count = index + 1)
-        })
-        .join("\n\n");
-    let headers: hyper::HeaderMap = [
-        (
-            hyper::header::CONTENT_TYPE,
-            "application/x-subrip; charset=utf-8".parse().unwrap(),
-        ),
-        // TODO: change this name
-        (
-            hyper::header::CONTENT_DISPOSITION,
-            "attachment; filename=\"subtitles.srt\"".parse().unwrap(),
-        ),
-    ]
+        .bytes_stream()
+        .map_err(std::io::Error::other);
+    let headers: hyper::HeaderMap = [(
+        hyper::header::CONTENT_TYPE,
+        "text/vtt; charset=utf-8".parse().unwrap(),
+    )]
     .into_iter()
     .collect();
-    Ok((headers, srt))
+    Ok((headers, StreamMapper(response)))
+}
+
+struct StreamMapper<
+    S: futures::stream::Stream<Item = std::io::Result<axum::body::Bytes>> + Send + 'static,
+>(S);
+impl<S> axum::response::IntoResponse for StreamMapper<S>
+where
+    S: futures::stream::Stream<Item = std::io::Result<axum::body::Bytes>> + Send + 'static,
+{
+    fn into_response(self) -> axum::response::Response {
+        axum::response::Response::new(axum::body::Body::from_stream(self.0))
+    }
 }

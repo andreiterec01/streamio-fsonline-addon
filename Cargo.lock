@@ -799,7 +799,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "vtt",
 ]
 
 [[package]]
@@ -2677,15 +2676,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vtt"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c8b3570ab6438948707f823ac8b580aa8e339fff088f336de4a8d925fbea2ab"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "walkdir"
