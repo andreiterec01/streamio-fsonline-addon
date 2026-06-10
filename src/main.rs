@@ -10,7 +10,7 @@ use clap::Parser;
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, services::ServeFile};
 
-use crate::service::{ImdbService, VideoServer};
+use crate::service::{fsonline_service::VideoServer, imdb_service::ImdbService};
 
 mod args;
 mod contracts;
@@ -18,7 +18,6 @@ mod error;
 mod mw;
 mod routes;
 mod service;
-
 #[derive(Clone)]
 pub struct UsesHttps(pub bool);
 

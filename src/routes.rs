@@ -1,6 +1,7 @@
+use anyhow::Context;
 use axum::{
     Form, Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, State},
 };
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
@@ -10,7 +11,10 @@ use crate::{
     AppState, UsesHttps,
     contracts::{ImdbSeries, MovieKey, MovieOrSeriesDataKey, PlayerData, Subtitle},
     error::WebResult,
-    service::{ImdbService, MovieData, VideoServer},
+    service::{
+        fsonline_service::{MovieData, SubtitleFsonline, VideoServer},
+        imdb_service::ImdbService,
+    },
 };
 
 pub fn routes() -> Router<AppState> {
@@ -21,7 +25,7 @@ pub fn routes() -> Router<AppState> {
         .route("/stream/movie/{imdb_id}", get(series))
         .route("/subtitles/series/{imdb_id}/{filename}", get(subtitles))
         .route("/subtitles/movie/{imdb_id}/{filename}", get(subtitles))
-        .route("/v1/api/subtitles/redirect", get(redirect_subtitles))
+        .route("/v1/api/subtitles/{imdb}/{md5}", get(redirect_subtitles))
 }
 
 async fn get_movie_url(
@@ -62,9 +66,10 @@ impl Stream {
     fn url<'a>(
         url: Arc<str>,
         server_name: Arc<str>,
-        subtitles: impl IntoIterator<Item = &'a str>,
+        subtitles: impl IntoIterator<Item = &'a SubtitleFsonline>,
         uses_https: bool,
         host: &str,
+        imdb: ImdbSeries,
     ) -> Stream {
         Stream {
             name: "FSonline",
@@ -76,7 +81,7 @@ impl Stream {
             external_url: None,
             subtitles: subtitles
                 .into_iter()
-                .map(|s| Subtitle::detect_from_url(uses_https, host, s))
+                .map(|s| Subtitle::subtitle(uses_https, host, s, imdb))
                 .into_iter()
                 .collect(),
         }
@@ -128,9 +133,10 @@ async fn series(
             Some(Stream::url(
                 r.data.video.clone()?,
                 r.server_name.clone(),
-                r.data.subtitles.iter().map(|v| v.deref()),
+                r.data.subtitles.iter(),
                 uses_https,
                 &host,
+                *imdb_id,
             ))
         })
         .chain(
@@ -176,7 +182,7 @@ async fn subtitles(
             r.data
                 .subtitles
                 .iter()
-                .flat_map(|s| Some(Subtitle::detect_from_url(uses_https, &host, &s)))
+                .map(|s| Subtitle::subtitle(uses_https, &host, s, imdb_id))
         })
         .collect();
     Ok(Json(SubtitlesList { subtitles }))
@@ -184,19 +190,45 @@ async fn subtitles(
 
 #[derive(Deserialize)]
 struct SubtitleQuery {
-    url: String,
+    imdb: ImdbSeries,
+    md5: String,
 }
 
-// TODO: is dangerous to make a request where the user wants. I should use the id of the movie and use the cache to get the subtitle.
 async fn redirect_subtitles(
+    State(movie): State<VideoServer>,
+    State(imdb_service): State<ImdbService>,
     State(client): State<reqwest::Client>,
-    Query(SubtitleQuery { url }): Query<SubtitleQuery>,
+    Path(SubtitleQuery { imdb, md5 }): Path<SubtitleQuery>,
 ) -> WebResult<(
     hyper::HeaderMap,
     StreamMapper<impl futures::stream::Stream<Item = std::io::Result<axum::body::Bytes>>>,
 )> {
+    let md5 = md5
+        .strip_suffix(".vtt")
+        .context("Suffix .vtt was missing")?;
+    let MovieData {
+        movie_name,
+        release_year,
+    } = imdb_service.get(imdb.imdb_id, imdb.is_series()).await?;
+    let data = match imdb.series_data {
+        Some(data) => MovieOrSeriesDataKey::Series(data),
+        None => MovieOrSeriesDataKey::Movie { release_year },
+    };
+    let r = movie
+        .get(&MovieKey {
+            movie: movie_name,
+            data,
+        })
+        .await?;
+
+    let subtitle = r
+        .iter()
+        .flat_map(|player| player.data.subtitles.iter())
+        .find(|s| s.md5() == md5)
+        .context("Failed to find the language requested")?;
+
     let response = client
-        .get(url)
+        .get(subtitle.url.deref())
         .send()
         .await
         .map_err(anyhow::Error::from)?

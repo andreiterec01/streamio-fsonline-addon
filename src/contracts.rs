@@ -3,7 +3,28 @@ use std::{fmt::Display, str::FromStr, sync::Arc};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use crate::service::VideoAndSubtitles;
+use crate::service::fsonline_service::{SubtitleFsonline, VideoAndSubtitles};
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub enum Language {
+    #[serde(rename = "ron")]
+    Romania,
+    #[serde(rename = "eng")]
+    English,
+    #[serde(rename = "_unrecognized")]
+    Unrecognized,
+}
+
+impl Display for Language {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Romania => "ron",
+            Self::English => "eng",
+            Self::Unrecognized => "_unrecognized",
+        };
+        value.fmt(f)
+    }
+}
 
 #[derive(Serialize)]
 pub struct Subtitle {
@@ -18,66 +39,24 @@ pub struct Subtitle {
     /**
      * Language code for the subtitle, if a valid ISO 639-2 code is not sent, the text of this value will be used instead.
      */
-    lang: &'static str,
+    lang: Language,
 }
-/*
 
-
-
-
-
-
-
-
-
-
-*/
 impl Subtitle {
-    pub fn detect_from_url(uses_https: bool, host: &str, url: &str) -> Self {
-        static CORELATIONS: &[(&'static str, &'static str)] = &[
-            ("romanian.vtt", "ron"),
-            ("english.vtt", "eng"),
-            ("finnish.vtt", "fin"),
-            ("swedish.vtt", "swe"),
-            ("norwegian.vtt", "nno"),
-            ("french.vtt", "fra"),
-            ("indonesian.vtt", "ind"),
-            ("hungarian.vtt", "hun"),
-            ("portuguese.vtt", "por"),
-            ("czech.vtt", "ces"),
-            ("german.vtt", "deu"),
-            ("polish.vtt", "pol"),
-            ("greek.vtt", "ell"),
-            ("italian.vtt", "ita"),
-            ("danish.vtt", "dan"),
-            ("turkish.vtt", "tur"),
-            ("spanish.vtt", "spa"),
-            ("arabic.vtt", "ara"),
-        ];
-        let Some(last) = url.split('/').next_back() else {
-            return Self::unrecognized(uses_https, host, url);
-        };
-        let name = last.to_lowercase();
-        for (corelation, lang) in CORELATIONS {
-            if name.ends_with(corelation) {
-                return Self::subtitle(uses_https, host, url, lang);
-            }
-        }
-
-        tracing::warn!("Failed to categorize subtitle {}", url);
-        Self::unrecognized(uses_https, host, url)
-    }
-
-    pub fn unrecognized(uses_https: bool, host: &str, url: &str) -> Self {
-        Self::subtitle(uses_https, host, url, "_unrecognized")
-    }
-
-    pub fn subtitle(uses_https: bool, host: &str, url: &str, lang: &'static str) -> Self {
+    pub fn subtitle(
+        uses_https: bool,
+        host: &str,
+        fsonline_subtitle: &SubtitleFsonline,
+        imdb: ImdbSeries,
+    ) -> Self {
         let protocol = if uses_https { "https" } else { "http" };
         Self {
             id: uuid::Uuid::new_v4(),
-            url: format!("{protocol}://{host}/v1/api/subtitles/redirect?url={url}"),
-            lang,
+            url: format!(
+                "{protocol}://{host}/v1/api/subtitles/{imdb}/{}.vtt",
+                fsonline_subtitle.md5()
+            ),
+            lang: fsonline_subtitle.lang,
         }
     }
 }
@@ -129,6 +108,7 @@ impl Display for MovieKey {
     }
 }
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct ImdbSeries {
     pub imdb_id: u64,
     pub series_data: Option<SeriesData>,
