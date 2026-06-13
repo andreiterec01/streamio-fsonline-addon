@@ -7,11 +7,11 @@ use serde::Serialize;
 
 use crate::{
     contracts::{Language, MovieKey, PlayerData, PlayerOption, SeriesData},
-    service::browser_discovery::BrowserDiscovery,
+    service::scrappers,
 };
 
 const INVALID_BROWSER_SERVERS: &[&str] = &["Doodstream"];
-const INVALID_SCRAPPING_SERVERS: &[&str] = &["Vidsrc"];
+const INVALID_SCRAPPING_SERVERS: &[&str] = &["Vidsrc", "VOE"];
 
 #[derive(Clone)]
 pub struct MovieData {
@@ -22,7 +22,7 @@ pub struct MovieData {
 #[derive(Clone)]
 pub struct VideoServer {
     cache: moka::future::Cache<MovieKey, Arc<[PlayerData]>>,
-    browser: Arc<BrowserDiscovery>,
+    player_scrapper: Arc<scrappers::PlayerScrappers>,
     client: reqwest::Client,
 }
 
@@ -32,10 +32,13 @@ fn normalize_movie_name(movie: &str) -> String {
 }
 
 impl VideoServer {
-    pub async fn new(client: reqwest::Client, headless_browser: bool) -> anyhow::Result<Self> {
+    pub async fn new(
+        client: reqwest::Client,
+        player_scrapper: scrappers::PlayerScrappers,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             client,
-            browser: Arc::new(BrowserDiscovery::new(headless_browser).await?),
+            player_scrapper: Arc::new(player_scrapper),
             cache: moka::future::CacheBuilder::new(100_000)
                 .time_to_live(Duration::from_secs(3600 * 4))
                 .build(),
@@ -86,7 +89,7 @@ impl VideoServer {
                         server_name: p.server_name.into()
                     };
                 }
-                let data = self.browser.get_video(&p.iframe_player).await.inspect_err(|e| {
+                let data = self.player_scrapper.get_video(&p).await.inspect_err(|e| {
                     tracing::warn!("Failed to get the video from server {} for {}: {}", p.server_name,p.iframe_player, e);
                 }).ok().unwrap_or_default();
                 PlayerData {

@@ -10,7 +10,11 @@ use clap::Parser;
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, services::ServeFile};
 
-use crate::service::{fsonline_service::VideoServer, imdb_service::ImdbService};
+use crate::service::{
+    fsonline_service::VideoServer,
+    imdb_service::ImdbService,
+    scrappers::{PlayerScrappers, vidmoly::VidmolyScrapper},
+};
 
 mod args;
 mod contracts;
@@ -47,8 +51,16 @@ async fn main() -> anyhow::Result<()> {
         (_, _) => None,
     };
     let client = reqwest::Client::new();
+
+    let browser = crate::service::scrappers::browser_discovery_scrapper::BrowserDiscovery::new(
+        args.headless_browser,
+    )
+    .await?;
+
+    let mut scrappers = PlayerScrappers::new(browser);
+    scrappers.add_scrapper(VidmolyScrapper::new(client.clone()));
     let state = AppState {
-        server: VideoServer::new(client.clone(), args.headless_browser).await?,
+        server: VideoServer::new(client.clone(), scrappers).await?,
         imdb_server: ImdbService::new(client.clone()),
         uses_https: UsesHttps(config.is_some()),
         client,

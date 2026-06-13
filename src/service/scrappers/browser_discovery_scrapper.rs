@@ -3,7 +3,10 @@ use std::time::Duration;
 use anyhow::Context;
 use chromiumoxide::{Browser, cdp::browser_protocol::network::EventRequestWillBeSent};
 
-use crate::service::fsonline_service::{SubtitleFsonline, VideoAndSubtitles};
+use crate::service::{
+    fsonline_service::{SubtitleFsonline, VideoAndSubtitles},
+    scrappers,
+};
 
 pub struct BrowserDiscovery {
     browser: Browser,
@@ -30,7 +33,11 @@ impl BrowserDiscovery {
         });
         Ok(Self { browser })
     }
-    pub async fn get_video(&self, url: &str) -> anyhow::Result<VideoAndSubtitles> {
+}
+
+#[async_trait::async_trait]
+impl scrappers::PlayerScrapper for BrowserDiscovery {
+    async fn get_video(&self, url: &str) -> anyhow::Result<VideoAndSubtitles> {
         use futures::StreamExt;
 
         let page = self.browser.new_page(url).await?;

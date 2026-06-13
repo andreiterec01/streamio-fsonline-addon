@@ -28,6 +28,7 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/api/subtitles/{imdb}/{md5}", get(redirect_subtitles))
 }
 
+#[axum::debug_handler]
 async fn get_movie_url(
     State(movie): State<VideoServer>,
     Form(series): Form<MovieKey>,

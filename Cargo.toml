@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
+async-trait = "0.1.89"
 axum = { version = "0.8.9", features = ["macros"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 chromiumoxide = "0.9.1"
@@ -16,6 +17,7 @@ hyper = "1.10.1"
 itertools = "0.14.0"
 md5 = "0.8.0"
 moka = { version = "0.12.15", features = ["future"] }
+regex = "1.12.4"
 reqwest = { version = "0.13.4", features = ["form", "gzip", "json", "stream"] }
 scraper = "0.27.0"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
