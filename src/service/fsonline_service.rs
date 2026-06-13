@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, ops::Deref, sync::Arc, time::Duration};
 
 use futures::future::join_all;
 use itertools::Itertools;
@@ -9,6 +9,9 @@ use crate::{
     contracts::{Language, MovieKey, PlayerData, PlayerOption, SeriesData},
     service::browser_discovery::BrowserDiscovery,
 };
+
+const INVALID_BROWSER_SERVERS: &[&str] = &["Doodstream"];
+const INVALID_SCRAPPING_SERVERS: &[&str] = &["Vidsrc"];
 
 #[derive(Clone)]
 pub struct MovieData {
@@ -71,12 +74,18 @@ impl VideoServer {
                 .error_for_status()?
                 .text()
                 .await?;
-            let players = get_player_options(response);
+            let mut players = get_player_options(response);
+            players.retain(|player| !INVALID_BROWSER_SERVERS.contains(&player.server_name.deref()));
             let players_string = players.iter().map(|p| format!("{}: {}", p.server_name,p.iframe_player)).join("\n");
             tracing::info!("For {} got the players:\n{}", movie, players_string);
-
-
             let players = players.into_iter().map(async |p|  {
+                if INVALID_SCRAPPING_SERVERS.contains(&p.server_name.deref()) {
+                    return PlayerData {
+                        data: VideoAndSubtitles::default(),
+                        iframe_player: p.iframe_player.into(),
+                        server_name: p.server_name.into()
+                    };
+                }
                 let data = self.browser.get_video(&p.iframe_player).await.inspect_err(|e| {
                     tracing::warn!("Failed to get the video from server {} for {}: {}", p.server_name,p.iframe_player, e);
                 }).ok().unwrap_or_default();
