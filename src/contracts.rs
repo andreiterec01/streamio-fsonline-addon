@@ -47,7 +47,7 @@ impl Subtitle {
         uses_https: bool,
         host: &str,
         fsonline_subtitle: &SubtitleFsonline,
-        imdb: ImdbSeries,
+        imdb: ImdbId,
     ) -> Self {
         let protocol = if uses_https { "https" } else { "http" };
         Self {
@@ -109,18 +109,18 @@ impl Display for MovieKey {
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub struct ImdbSeries {
+pub struct ImdbId {
     pub imdb_id: u64,
     pub series_data: Option<SeriesData>,
 }
 
-impl ImdbSeries {
+impl ImdbId {
     pub fn is_series(&self) -> bool {
         self.series_data.is_some()
     }
 }
 
-impl Display for ImdbSeries {
+impl Display for ImdbId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "tt{}", self.imdb_id)?;
         if let Some(data) = &self.series_data {
@@ -130,7 +130,7 @@ impl Display for ImdbSeries {
     }
 }
 
-impl FromStr for ImdbSeries {
+impl FromStr for ImdbId {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let invalid_imdb_name = || format!("Invalid imdb name received: {s}");
@@ -166,7 +166,7 @@ impl FromStr for ImdbSeries {
     }
 }
 
-impl Serialize for ImdbSeries {
+impl Serialize for ImdbId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -175,13 +175,13 @@ impl Serialize for ImdbSeries {
     }
 }
 
-impl<'de> Deserialize<'de> for ImdbSeries {
+impl<'de> Deserialize<'de> for ImdbId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         use serde::de::Error;
         let r = <&str as Deserialize<'de>>::deserialize(deserializer)?;
-        r.parse::<ImdbSeries>().map_err(D::Error::custom)
+        r.parse::<ImdbId>().map_err(D::Error::custom)
     }
 }

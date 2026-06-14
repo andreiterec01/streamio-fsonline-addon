@@ -13,6 +13,7 @@ use tower_http::{cors::CorsLayer, services::ServeFile};
 use crate::service::{
     fsonline_service::VideoServer,
     imdb_service::ImdbService,
+    local_m3u8_player::LocalPlayer,
     scrappers::{PlayerScrappers, vidmoly::VidmolyScrapper},
 };
 
@@ -35,6 +36,7 @@ pub struct AppState {
     client: reqwest::Client,
     uses_https: UsesHttps,
     host: Host,
+    local_player: LocalPlayer,
 }
 
 #[tokio::main]
@@ -63,6 +65,12 @@ async fn main() -> anyhow::Result<()> {
         server: VideoServer::new(client.clone(), scrappers).await?,
         imdb_server: ImdbService::new(client.clone()),
         uses_https: UsesHttps(config.is_some()),
+        // TODO: make the 3600*4 configurable
+        local_player: LocalPlayer::new(
+            client.clone(),
+            Duration::from_secs(3600 * 4),
+            10 * 1024 * 1024,
+        ),
         client,
         host: Host(args.host.into()),
     };

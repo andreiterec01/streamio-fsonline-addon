@@ -9,13 +9,14 @@ use std::{ops::Deref, sync::Arc};
 
 use crate::{
     AppState, UsesHttps,
-    contracts::{ImdbSeries, MovieKey, MovieOrSeriesDataKey, PlayerData, Subtitle},
+    contracts::{ImdbId, MovieKey, MovieOrSeriesDataKey, PlayerData, Subtitle},
     error::WebResult,
     service::{
         fsonline_service::{MovieData, SubtitleFsonline, VideoServer},
         imdb_service::ImdbService,
     },
 };
+mod m3u8_routes;
 
 pub fn routes() -> Router<AppState> {
     use axum::routing::*;
@@ -26,6 +27,7 @@ pub fn routes() -> Router<AppState> {
         .route("/subtitles/series/{imdb_id}/{filename}", get(subtitles))
         .route("/subtitles/movie/{imdb_id}/{filename}", get(subtitles))
         .route("/v1/api/subtitles/{imdb}/{md5}", get(redirect_subtitles))
+        .merge(m3u8_routes::routes())
 }
 
 #[axum::debug_handler]
@@ -70,12 +72,38 @@ impl Stream {
         subtitles: impl IntoIterator<Item = &'a SubtitleFsonline>,
         uses_https: bool,
         host: &str,
-        imdb: ImdbSeries,
+        imdb: ImdbId,
     ) -> Stream {
         Stream {
             name: "FSonline",
             title: server_name,
             url: Some(url),
+            behavior_hints: Some(BehaviourHints {
+                not_web_ready: true,
+            }),
+            external_url: None,
+            subtitles: subtitles
+                .into_iter()
+                .map(|s| Subtitle::subtitle(uses_https, host, s, imdb))
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn local_player_url<'a>(
+        server_name: Arc<str>,
+        subtitles: impl IntoIterator<Item = &'a SubtitleFsonline>,
+        uses_https: bool,
+        host: &str,
+        imdb: ImdbId,
+    ) -> Stream {
+        let protocol = if uses_https { "https" } else { "http" };
+        Stream {
+            name: "FSonline local player",
+            url: Some(
+                format!("{protocol}://{host}/v1/api/{server_name}/{imdb}/master.m3u8").into(),
+            ),
+            title: server_name,
             behavior_hints: Some(BehaviourHints {
                 not_web_ready: true,
             }),
@@ -109,7 +137,7 @@ async fn series(
     State(imdb_service): State<ImdbService>,
     State(UsesHttps(uses_https)): State<UsesHttps>,
     State(crate::Host(host)): State<crate::Host>,
-    imdb_id: Path<ImdbSeries>,
+    imdb_id: Path<ImdbId>,
 ) -> WebResult<Json<SeriesResponse>> {
     let MovieData {
         movie_name,
@@ -144,6 +172,18 @@ async fn series(
             r.iter()
                 .map(|r| Stream::external_url(r.iframe_player.clone(), &r.server_name)),
         )
+        .chain(r.iter().flat_map(|r| {
+            if r.data.video.is_none() {
+                return None;
+            }
+            Some(Stream::local_player_url(
+                r.server_name.clone(),
+                r.data.subtitles.iter(),
+                uses_https,
+                &host,
+                *imdb_id,
+            ))
+        }))
         .collect();
     Ok(Json(SeriesResponse { streams }))
 }
@@ -158,7 +198,7 @@ async fn subtitles(
     State(imdb_service): State<ImdbService>,
     State(UsesHttps(uses_https)): State<UsesHttps>,
     State(crate::Host(host)): State<crate::Host>,
-    Path((imdb_id, _)): Path<(ImdbSeries, String)>,
+    Path((imdb_id, _)): Path<(ImdbId, String)>,
 ) -> WebResult<Json<SubtitlesList>> {
     let MovieData {
         movie_name,
@@ -191,7 +231,7 @@ async fn subtitles(
 
 #[derive(Deserialize)]
 struct SubtitleQuery {
-    imdb: ImdbSeries,
+    imdb: ImdbId,
     md5: String,
 }
 
