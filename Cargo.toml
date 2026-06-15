@@ -24,10 +24,16 @@ reqwest = { version = "0.13.4", features = ["form", "gzip", "json", "stream"] }
 scraper = "0.27.0"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 thiserror = "2.0.18"
+time = { version = "0.3.49", features = ["macros"] }
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-util = "0.7.18"
 tower = "0.5.3"
-tower-http = { version = "0.6.11", features = ["cors", "fs"] }
+tower-http = { version = "0.7", features = ["cors", "fs"] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = [
+    "env-filter",
+    "local-time",
+    "time",
+] }
 uuid = { version = "1.23.2", features = ["serde", "v4"] }

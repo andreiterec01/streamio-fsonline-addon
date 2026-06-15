@@ -7,8 +7,10 @@ use std::{
 use axum::extract::FromRef;
 use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use clap::Parser;
+use time::macros::format_description;
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, services::ServeFile};
+use tracing_subscriber::fmt::time::LocalTime;
 
 use crate::service::{
     fsonline_service::VideoServer,
@@ -44,7 +46,15 @@ async fn main() -> anyhow::Result<()> {
     // all imdb keys at: https://datasets.imdbws.com/title.basics.tsv.gz
     dotenvy::dotenv().ok();
     let args = args::Args::parse();
-    tracing_subscriber::fmt().init();
+
+    let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stderr());
+    tracing_subscriber::fmt()
+        .with_writer(non_blocking)
+        .with_timer(LocalTime::new(format_description!(
+            "[day]/[month] [hour]:[minute]:[second].[subsecond digits:3]"
+        )))
+        .init();
+
     let config = match (args.ssl_cert_path, args.ssl_key_path) {
         (Some(cert_path), Some(key_path)) => {
             let config = RustlsConfig::from_pem_file(cert_path, key_path).await?;
