@@ -13,7 +13,7 @@ use tower_http::{cors::CorsLayer, services::ServeFile};
 use crate::service::{
     fsonline_service::VideoServer,
     imdb_service::ImdbService,
-    local_m3u8_player::LocalPlayer,
+    local_m3u8_player::{LocalPlayer, LocalPlayerConfig},
     scrappers::{PlayerScrappers, vidmoly::VidmolyScrapper},
 };
 
@@ -61,16 +61,23 @@ async fn main() -> anyhow::Result<()> {
 
     let mut scrappers = PlayerScrappers::new(browser);
     scrappers.add_scrapper(VidmolyScrapper::new(client.clone()));
+    let local_player_config = LocalPlayerConfig {
+        // TODO: make this configurable
+        cache_ttl: Duration::from_secs(3600 * 4),
+        client: client.clone(),
+        directory_cache: &args.cache_path,
+        master_cache_size_bytes: args.master_cache_size,
+        memory_segments_cache_size: args.memory_segments_cache_size,
+        file_segments_cache_size: args.file_segments_cache_size_mb * 1024 * 1024,
+        cache_next_seconds_on_disk: 300,
+        parallelism_count: 4,
+    };
+    let local_player = LocalPlayer::new(local_player_config).await?;
     let state = AppState {
         server: VideoServer::new(client.clone(), scrappers).await?,
         imdb_server: ImdbService::new(client.clone()),
         uses_https: UsesHttps(config.is_some()),
-        // TODO: make the 3600*4 configurable
-        local_player: LocalPlayer::new(
-            client.clone(),
-            Duration::from_secs(3600 * 4),
-            10 * 1024 * 1024,
-        ),
+        local_player: local_player.clone(),
         client,
         host: Host(args.host.into()),
     };
@@ -121,8 +128,9 @@ async fn main() -> anyhow::Result<()> {
     };
 
     tracing::warn!("Received signal. Waiting for graceful shutdown");
-    server.await??;
-
+    let r = server.await;
+    local_player.close().await?;
+    r??;
     Ok(())
 }
 

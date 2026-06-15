@@ -13,4 +13,13 @@ pub struct Args {
     /// The host where this server is hosted. Used for redirecting subtitles
     #[clap(long, env)]
     pub host: String,
+    #[clap(long, env, default_value = "./cache")]
+    pub cache_path: PathBuf,
+    #[clap(long, env, default_value_t = 1024*1024*5)]
+    pub master_cache_size: u64,
+    #[clap(long, env, default_value_t = 1024*1024*100)]
+    pub memory_segments_cache_size: usize,
+
+    #[clap(long, env, default_value_t = 1024*15)]
+    pub file_segments_cache_size_mb: usize,
 }

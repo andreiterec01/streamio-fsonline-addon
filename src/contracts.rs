@@ -1,4 +1,4 @@
-use std::{fmt::Display, str::FromStr, sync::Arc};
+use std::{borrow::Cow, fmt::Display, str::FromStr, sync::Arc};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -181,7 +181,7 @@ impl<'de> Deserialize<'de> for ImdbId {
         D: serde::Deserializer<'de>,
     {
         use serde::de::Error;
-        let r = <&str as Deserialize<'de>>::deserialize(deserializer)?;
+        let r: Cow<'de, str> = Deserialize::deserialize(deserializer)?;
         r.parse::<ImdbId>().map_err(D::Error::custom)
     }
 }

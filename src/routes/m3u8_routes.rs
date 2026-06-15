@@ -15,7 +15,7 @@ use crate::{
     service::{
         fsonline_service::{MovieData, VideoServer},
         imdb_service::ImdbService,
-        local_m3u8_player::LocalPlayer,
+        local_m3u8_player::{LocalPlayer, SegmentId},
     },
 };
 
@@ -162,7 +162,7 @@ async fn m3u8_segment(
     imdb_service: State<ImdbService>,
     video_server: State<VideoServer>,
     local_player: State<LocalPlayer>,
-    path: Path<SegmentRequest>,
+    Path(path): Path<SegmentRequest>,
 ) -> WebResult<(HeaderMap, axum::body::Bytes)> {
     let MovieData {
         movie_name,
@@ -190,9 +190,12 @@ async fn m3u8_segment(
         .as_deref()
         .context("The video server was not extracted")?;
 
-    let content = local_player
-        .get_segment(m3u8_url, path.segment_number)
-        .await?;
+    let id = SegmentId {
+        imdb: path.imdb,
+        server_name: path.server_name.into(),
+        segment_index: path.segment_number,
+    };
+    let content = local_player.get_segment(id, m3u8_url).await?;
     let mut headers = HeaderMap::new();
     headers.insert(hyper::header::CONTENT_TYPE, "video/MP2T".parse().unwrap());
     // TODO: add support for this
