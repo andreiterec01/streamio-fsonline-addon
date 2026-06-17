@@ -3,17 +3,18 @@ use axum::{
     Form, Json, Router,
     extract::{Path, State},
 };
-use futures::TryStreamExt;
+use axum_extra::TypedHeader;
 use serde::{Deserialize, Serialize};
 use std::{ops::Deref, sync::Arc};
 
 use crate::{
     AppState, UsesHttps,
-    contracts::{ImdbId, MovieKey, MovieOrSeriesDataKey, PlayerData, Subtitle},
+    contracts::{ImdbId, MovieKey, PlayerData, Subtitle},
+    custom_extractor::axum_range::Ranged,
     error::WebResult,
     service::{
-        fsonline_service::{MovieData, SubtitleFsonline, VideoServer},
-        imdb_service::ImdbService,
+        ImdbToVideoServer,
+        fsonline_service::{SubtitleFsonline, VideoServer},
     },
 };
 mod m3u8_routes;
@@ -133,28 +134,12 @@ impl Stream {
 }
 
 async fn series(
-    State(movie): State<VideoServer>,
-    State(imdb_service): State<ImdbService>,
+    State(movie): State<ImdbToVideoServer>,
     State(UsesHttps(uses_https)): State<UsesHttps>,
     State(crate::Host(host)): State<crate::Host>,
-    imdb_id: Path<ImdbId>,
+    Path(imdb_id): Path<ImdbId>,
 ) -> WebResult<Json<SeriesResponse>> {
-    let MovieData {
-        movie_name,
-        release_year,
-    } = imdb_service
-        .get(imdb_id.imdb_id, imdb_id.is_series())
-        .await?;
-    let data = match imdb_id.series_data {
-        Some(data) => MovieOrSeriesDataKey::Series(data),
-        None => MovieOrSeriesDataKey::Movie { release_year },
-    };
-    let r = movie
-        .get(&MovieKey {
-            movie: movie_name,
-            data,
-        })
-        .await?;
+    let r = movie.get(imdb_id).await?;
 
     let streams = r
         .iter()
@@ -165,7 +150,7 @@ async fn series(
                 r.data.subtitles.iter(),
                 uses_https,
                 &host,
-                *imdb_id,
+                imdb_id,
             ))
         })
         .chain(
@@ -181,7 +166,7 @@ async fn series(
                 r.data.subtitles.iter(),
                 uses_https,
                 &host,
-                *imdb_id,
+                imdb_id,
             ))
         }))
         .collect();
@@ -194,28 +179,12 @@ struct SubtitlesList {
 }
 
 async fn subtitles(
-    State(movie): State<VideoServer>,
-    State(imdb_service): State<ImdbService>,
+    State(movie): State<ImdbToVideoServer>,
     State(UsesHttps(uses_https)): State<UsesHttps>,
     State(crate::Host(host)): State<crate::Host>,
     Path((imdb_id, _)): Path<(ImdbId, String)>,
 ) -> WebResult<Json<SubtitlesList>> {
-    let MovieData {
-        movie_name,
-        release_year,
-    } = imdb_service
-        .get(imdb_id.imdb_id, imdb_id.is_series())
-        .await?;
-    let data = match imdb_id.series_data {
-        Some(data) => MovieOrSeriesDataKey::Series(data),
-        None => MovieOrSeriesDataKey::Movie { release_year },
-    };
-    let r = movie
-        .get(&MovieKey {
-            movie: movie_name,
-            data,
-        })
-        .await?;
+    let r = movie.get(imdb_id).await?;
 
     let subtitles = r
         .iter()
@@ -236,31 +205,20 @@ struct SubtitleQuery {
 }
 
 async fn redirect_subtitles(
-    State(movie): State<VideoServer>,
-    State(imdb_service): State<ImdbService>,
+    State(movie): State<ImdbToVideoServer>,
     State(client): State<reqwest::Client>,
     Path(SubtitleQuery { imdb, md5 }): Path<SubtitleQuery>,
+    range: Option<TypedHeader<axum_extra::headers::Range>>,
 ) -> WebResult<(
     hyper::HeaderMap,
-    StreamMapper<impl futures::stream::Stream<Item = std::io::Result<axum::body::Bytes>>>,
+    // StreamMapper<impl futures::stream::Stream<Item = std::io::Result<axum::body::Bytes>>>,
+    Ranged,
 )> {
     let md5 = md5
         .strip_suffix(".vtt")
         .context("Suffix .vtt was missing")?;
-    let MovieData {
-        movie_name,
-        release_year,
-    } = imdb_service.get(imdb.imdb_id, imdb.is_series()).await?;
-    let data = match imdb.series_data {
-        Some(data) => MovieOrSeriesDataKey::Series(data),
-        None => MovieOrSeriesDataKey::Movie { release_year },
-    };
-    let r = movie
-        .get(&MovieKey {
-            movie: movie_name,
-            data,
-        })
-        .await?;
+
+    let r = movie.get(imdb).await?;
 
     let subtitle = r
         .iter()
@@ -268,6 +226,7 @@ async fn redirect_subtitles(
         .find(|s| s.md5() == md5)
         .context("Failed to find the language requested")?;
 
+    // TODO: add to cache
     let response = client
         .get(subtitle.url.deref())
         .send()
@@ -275,25 +234,18 @@ async fn redirect_subtitles(
         .map_err(anyhow::Error::from)?
         .error_for_status()
         .map_err(anyhow::Error::from)?
-        .bytes_stream()
-        .map_err(std::io::Error::other);
+        .text()
+        .await
+        .map_err(anyhow::Error::from)?;
+
+    let response = axum::body::Bytes::from(response);
+    let range = range.map(|TypedHeader(range)| range);
+
     let headers: hyper::HeaderMap = [(
         hyper::header::CONTENT_TYPE,
         "text/vtt; charset=utf-8".parse().unwrap(),
     )]
     .into_iter()
     .collect();
-    Ok((headers, StreamMapper(response)))
-}
-
-struct StreamMapper<
-    S: futures::stream::Stream<Item = std::io::Result<axum::body::Bytes>> + Send + 'static,
->(S);
-impl<S> axum::response::IntoResponse for StreamMapper<S>
-where
-    S: futures::stream::Stream<Item = std::io::Result<axum::body::Bytes>> + Send + 'static,
-{
-    fn into_response(self) -> axum::response::Response {
-        axum::response::Response::new(axum::body::Body::from_stream(self.0))
-    }
+    Ok((headers, Ranged::new(range, response)))
 }

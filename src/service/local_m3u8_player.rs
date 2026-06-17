@@ -9,7 +9,7 @@ use foyer::{
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
-use crate::contracts::ImdbId;
+use crate::{contracts::ImdbId, service::ImdbToVideoServer};
 
 pub struct M3U8Data {
     pub master: m3u8_rs::MasterPlaylist,
@@ -47,26 +47,35 @@ impl M3U8Data {
 
 #[derive(Serialize, Deserialize, Hash, PartialEq, Eq, Debug, Clone)]
 pub struct SegmentId {
-    pub server_name: Arc<str>,
-    pub imdb: ImdbId,
+    pub m3u8: M3U8CacheKey,
     pub segment_index: usize,
 }
 
 impl SegmentId {
     fn size(&self) -> usize {
-        self.server_name.len()
-            + size_of_val(&self.server_name)
-            + size_of_val(&self.imdb)
-            + size_of_val(&self.segment_index)
+        self.m3u8.size() + size_of_val(&self.segment_index)
+    }
+}
+
+#[derive(Serialize, Deserialize, Hash, PartialEq, Eq, Debug, Clone)]
+pub struct M3U8CacheKey {
+    pub imdb: ImdbId,
+    pub server_name: Arc<str>,
+}
+
+impl M3U8CacheKey {
+    fn size(&self) -> usize {
+        self.server_name.len() + size_of_val(&self.server_name) + size_of_val(&self.imdb)
     }
 }
 
 pub struct LocalPlayer {
     client: reqwest::Client,
-    m3u8_master_files: moka::future::Cache<String, Arc<M3U8Data>>,
+    m3u8_master_files: moka::future::Cache<M3U8CacheKey, Arc<M3U8Data>>,
     segments_data: HybridCache<SegmentId, hyper::body::Bytes>,
     parallelism_count: usize,
     send_to_cache: tokio::sync::mpsc::UnboundedSender<LoadCacheRequest>,
+    imdb_to_video_service: ImdbToVideoServer,
 }
 
 impl Clone for LocalPlayer {
@@ -77,12 +86,13 @@ impl Clone for LocalPlayer {
             segments_data: self.segments_data.clone(),
             parallelism_count: self.parallelism_count,
             send_to_cache: self.send_to_cache.clone(),
+            imdb_to_video_service: self.imdb_to_video_service.clone(),
         }
     }
 }
 
-fn weigher(key: &String, value: &Arc<M3U8Data>) -> u32 {
-    (key.capacity() + size_of::<String>() + value.size()) as u32
+fn weigher(key: &M3U8CacheKey, value: &Arc<M3U8Data>) -> u32 {
+    (key.size() + value.size()) as u32
 }
 
 #[derive(Clone)]
@@ -90,8 +100,7 @@ struct SegmentHeapEntry {
     priority: usize,
     range: std::ops::Range<usize>,
     metadata: Arc<M3U8Data>,
-    server_name: Arc<str>,
-    imdb: ImdbId,
+    m3u8: M3U8CacheKey,
 }
 
 impl PartialEq for SegmentHeapEntry {
@@ -115,18 +124,17 @@ impl Ord for SegmentHeapEntry {
 }
 
 struct LoadCacheRequest {
-    metadata: Arc<M3U8Data>,
-    start_index: usize,
-    server_name: Arc<str>,
-    imdb: ImdbId,
+    segment_id: SegmentId,
 }
 
 async fn load_cache(
     segments_cache: HybridCache<SegmentId, hyper::body::Bytes>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<LoadCacheRequest>,
-    client: reqwest::Client,
     segments_count: usize,
     parallelism: usize,
+    m3u8_master_files: moka::future::Cache<M3U8CacheKey, Arc<M3U8Data>>,
+    imdb_to_video_service: ImdbToVideoServer,
+    client: reqwest::Client,
 ) {
     let mut segments = BinaryHeap::<SegmentHeapEntry>::new();
     let mut set = JoinSet::new();
@@ -137,39 +145,55 @@ async fn load_cache(
             }
         }
         // TODO: fix the range to take into account the segment duration
-        while let Ok(LoadCacheRequest {
-            metadata,
-            start_index,
-            server_name,
-            imdb,
-        }) = rx.try_recv()
-        {
-            segments.push(SegmentHeapEntry {
-                priority: 0,
-                range: start_index + 1..start_index + 1 + segments_count,
-                metadata,
-                server_name,
-                imdb,
-            });
+        while let Ok(LoadCacheRequest { segment_id }) = rx.try_recv() {
+            match LocalPlayer::get_m3u8_inner(
+                &m3u8_master_files,
+                &imdb_to_video_service,
+                &client,
+                &segment_id.m3u8,
+            )
+            .await
+            {
+                Ok(metadata) => {
+                    segments.push(SegmentHeapEntry {
+                        priority: 0,
+                        range: segment_id.segment_index + 1
+                            ..segment_id.segment_index + 1 + segments_count,
+                        metadata,
+                        m3u8: segment_id.m3u8,
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Failed to load the metadata for {:?}: {e}", segment_id.m3u8);
+                }
+            }
         }
         if segments.is_empty() {
             tracing::info!("Done processing the cached entries");
-            let Some(LoadCacheRequest {
-                metadata,
-                start_index,
-                server_name,
-                imdb,
-            }) = rx.recv().await
-            else {
+            let Some(LoadCacheRequest { segment_id }) = rx.recv().await else {
                 return;
             };
-            segments.push(SegmentHeapEntry {
-                priority: 0,
-                range: start_index + 1..start_index + 1 + segments_count,
-                metadata,
-                server_name,
-                imdb,
-            });
+            match LocalPlayer::get_m3u8_inner(
+                &m3u8_master_files,
+                &imdb_to_video_service,
+                &client,
+                &segment_id.m3u8,
+            )
+            .await
+            {
+                Ok(metadata) => {
+                    segments.push(SegmentHeapEntry {
+                        priority: 0,
+                        range: segment_id.segment_index + 1
+                            ..segment_id.segment_index + 1 + segments_count,
+                        metadata,
+                        m3u8: segment_id.m3u8,
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Failed to load the metadata for {:?}: {e}", segment_id.m3u8);
+                }
+            }
         }
         let segment = segments.pop().unwrap();
 
@@ -186,9 +210,8 @@ async fn load_cache(
             }
         }
         let id = SegmentId {
-            imdb: segment.imdb,
+            m3u8: segment.m3u8,
             segment_index: segment.range.start,
-            server_name: segment.server_name.clone(),
         };
         let cache_location = if segment.priority == 0 {
             Location::Default
@@ -231,6 +254,7 @@ pub struct LocalPlayerConfig<'a> {
     pub memory_segments_cache_size: usize,
     pub parallelism_count: usize,
     pub cache_next_seconds_on_disk: usize,
+    pub imdb_to_video_service: ImdbToVideoServer,
 }
 
 impl LocalPlayer {
@@ -244,6 +268,7 @@ impl LocalPlayer {
             memory_segments_cache_size,
             parallelism_count,
             cache_next_seconds_on_disk,
+            imdb_to_video_service,
         }: LocalPlayerConfig<'_>,
     ) -> anyhow::Result<Self> {
         let device = FsDeviceBuilder::new(directory_cache)
@@ -262,15 +287,22 @@ impl LocalPlayer {
             .build()
             .await?;
 
+        let m3u8_master_files = moka::future::CacheBuilder::new(master_cache_size_bytes)
+            .weigher(weigher)
+            .time_to_live(cache_ttl)
+            .build();
+
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
         // TODO: make this configurable
         tokio::spawn(load_cache(
             segments_data.clone(),
             rx,
-            client.clone(),
             30,
             parallelism_count,
+            m3u8_master_files.clone(),
+            imdb_to_video_service.clone(),
+            client.clone(),
         ));
 
         Ok(Self {
@@ -282,16 +314,28 @@ impl LocalPlayer {
             segments_data,
             parallelism_count,
             send_to_cache: tx,
+            imdb_to_video_service,
         })
     }
-    // TODO: find a way to fix the cache duration
-    pub async fn get_m3u8(&self, m3u8_url: &str) -> anyhow::Result<Arc<M3U8Data>> {
-        let r = self
-            .m3u8_master_files
-            .try_get_with_by_ref(m3u8_url, async {
-                let master_bytes = self
-                    .client
-                    .get(m3u8_url)
+
+    async fn get_m3u8_inner(
+        m3u8_master_files: &moka::future::Cache<M3U8CacheKey, Arc<M3U8Data>>,
+        imdb_to_video_service: &ImdbToVideoServer,
+        client: &reqwest::Client,
+        m3u8_key: &M3U8CacheKey,
+    ) -> anyhow::Result<Arc<M3U8Data>> {
+        let r = m3u8_master_files
+            .try_get_with_by_ref(m3u8_key, async {
+                let m3u8_url = imdb_to_video_service
+                    .get_from_server(m3u8_key.imdb, &m3u8_key.server_name)
+                    .await?
+                    .context("Player not found")?
+                    .data
+                    .video
+                    .context("Video url not scrapped")?;
+
+                let master_bytes = client
+                    .get(m3u8_url.deref())
                     .send()
                     .await?
                     .error_for_status()?
@@ -320,8 +364,7 @@ impl LocalPlayer {
                     .find(|v| !v.is_i_frame)
                     .context("No data stream")?;
 
-                let playlist_data = self
-                    .client
+                let playlist_data = client
                     .get(&stream.uri)
                     .send()
                     .await?
@@ -345,25 +388,31 @@ impl LocalPlayer {
         }
     }
 
-    pub async fn get_segment(
-        &self,
-        segment_id: SegmentId,
-        m3u8_url: &str,
-    ) -> anyhow::Result<Bytes> {
-        let metadata = self.get_m3u8(&m3u8_url).await?;
+    // TODO: find a way to fix the cache duration
+    pub async fn get_m3u8(&self, m3u8_key: &M3U8CacheKey) -> anyhow::Result<Arc<M3U8Data>> {
+        Self::get_m3u8_inner(
+            &self.m3u8_master_files,
+            &self.imdb_to_video_service,
+            &self.client,
+            m3u8_key,
+        )
+        .await
+    }
+
+    pub async fn get_segment(&self, segment_id: SegmentId) -> anyhow::Result<Bytes> {
         self.send_to_cache
             .send(LoadCacheRequest {
-                metadata: metadata.clone(),
-                start_index: segment_id.segment_index + 1,
-                server_name: segment_id.server_name.clone(),
-                imdb: segment_id.imdb,
+                segment_id: segment_id.clone(),
             })
             .ok();
         let r = self
             .segments_data
             .get_or_fetch(&segment_id, || {
                 let this = self.clone();
+                let m3u8_key = segment_id.m3u8.clone();
                 async move {
+                    let metadata = this.get_m3u8(&m3u8_key).await?;
+
                     let segment = metadata
                         .playlist
                         .segments

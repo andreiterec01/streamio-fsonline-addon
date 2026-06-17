@@ -13,6 +13,7 @@ use tower_http::{cors::CorsLayer, services::ServeFile};
 use tracing_subscriber::fmt::time::LocalTime;
 
 use crate::service::{
+    ImdbToVideoServer,
     fsonline_service::VideoServer,
     imdb_service::ImdbService,
     local_m3u8_player::{LocalPlayer, LocalPlayerConfig},
@@ -21,6 +22,7 @@ use crate::service::{
 
 mod args;
 mod contracts;
+mod custom_extractor;
 mod error;
 mod mw;
 mod routes;
@@ -33,8 +35,8 @@ pub struct Host(pub Arc<str>);
 
 #[derive(FromRef, Clone)]
 pub struct AppState {
-    server: VideoServer,
-    imdb_server: ImdbService,
+    video_service: VideoServer,
+    imdb_to_video_server: ImdbToVideoServer,
     client: reqwest::Client,
     uses_https: UsesHttps,
     host: Host,
@@ -71,6 +73,9 @@ async fn main() -> anyhow::Result<()> {
 
     let mut scrappers = PlayerScrappers::new(browser);
     scrappers.add_scrapper(VidmolyScrapper::new(client.clone()));
+    let video_service = VideoServer::new(client.clone(), scrappers).await?;
+    let imdb_server = ImdbService::new(client.clone());
+    let imdb_to_video_server = ImdbToVideoServer::new(video_service.clone(), imdb_server);
     let local_player_config = LocalPlayerConfig {
         // TODO: make this configurable
         cache_ttl: Duration::from_secs(3600 * 4),
@@ -81,11 +86,12 @@ async fn main() -> anyhow::Result<()> {
         file_segments_cache_size: args.file_segments_cache_size_mb * 1024 * 1024,
         cache_next_seconds_on_disk: 300,
         parallelism_count: 4,
+        imdb_to_video_service: imdb_to_video_server.clone(),
     };
     let local_player = LocalPlayer::new(local_player_config).await?;
     let state = AppState {
-        server: VideoServer::new(client.clone(), scrappers).await?,
-        imdb_server: ImdbService::new(client.clone()),
+        video_service,
+        imdb_to_video_server,
         uses_https: UsesHttps(config.is_some()),
         local_player: local_player.clone(),
         client,
