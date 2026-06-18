@@ -9,7 +9,7 @@ use foyer::{
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
-use crate::{contracts::ImdbId, service::ImdbToVideoServer};
+use crate::{contracts::Imdb, service::ImdbToVideoServer};
 
 pub struct M3U8Data {
     pub master: m3u8_rs::MasterPlaylist,
@@ -59,7 +59,7 @@ impl SegmentId {
 
 #[derive(Serialize, Deserialize, Hash, PartialEq, Eq, Debug, Clone)]
 pub struct M3U8CacheKey {
-    pub imdb: ImdbId,
+    pub imdb: Imdb,
     pub server_name: Arc<str>,
 }
 

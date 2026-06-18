@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::{
     AppState, UsesHttps,
-    contracts::ImdbId,
+    contracts::Imdb,
     custom_extractor::{DontLogResponse, axum_range::Ranged},
     error::WebResult,
     service::local_m3u8_player::{LocalPlayer, M3U8CacheKey, SegmentId},
@@ -31,13 +31,13 @@ pub(super) fn routes() -> Router<AppState> {
 #[derive(Deserialize)]
 struct ServerNameAndImdb {
     server_name: String,
-    imdb: ImdbId,
+    imdb: Imdb,
 }
 
 #[derive(Deserialize)]
 struct SegmentRequest {
     server_name: String,
-    imdb: ImdbId,
+    imdb: Imdb,
     segment_number: usize,
 }
 

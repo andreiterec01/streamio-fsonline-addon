@@ -47,7 +47,7 @@ impl Subtitle {
         uses_https: bool,
         host: &str,
         fsonline_subtitle: &SubtitleFsonline,
-        imdb: ImdbId,
+        imdb: Imdb,
     ) -> Self {
         let protocol = if uses_https { "https" } else { "http" };
         Self {
@@ -109,20 +109,20 @@ impl Display for MovieKey {
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub struct ImdbId {
+pub struct Imdb {
     pub imdb_id: u64,
     pub series_data: Option<SeriesData>,
 }
 
-impl ImdbId {
+impl Imdb {
     pub fn is_series(&self) -> bool {
         self.series_data.is_some()
     }
 }
 
-impl Display for ImdbId {
+impl Display for Imdb {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "tt{}", self.imdb_id)?;
+        write!(f, "tt{:07}", self.imdb_id)?;
         if let Some(data) = &self.series_data {
             write!(f, ":{}:{}", data.season, data.episode)?;
         }
@@ -130,7 +130,7 @@ impl Display for ImdbId {
     }
 }
 
-impl FromStr for ImdbId {
+impl FromStr for Imdb {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let invalid_imdb_name = || format!("Invalid imdb name received: {s}");
@@ -166,7 +166,7 @@ impl FromStr for ImdbId {
     }
 }
 
-impl Serialize for ImdbId {
+impl Serialize for Imdb {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -175,13 +175,29 @@ impl Serialize for ImdbId {
     }
 }
 
-impl<'de> Deserialize<'de> for ImdbId {
+impl<'de> Deserialize<'de> for Imdb {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         use serde::de::Error;
         let r: Cow<'de, str> = Deserialize::deserialize(deserializer)?;
-        r.parse::<ImdbId>().map_err(D::Error::custom)
+        r.parse::<Imdb>().map_err(D::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::contracts::Imdb;
+
+    #[test]
+    fn test_imdb() {
+        let input = "tt1234567";
+        let imdb: Imdb = input.parse().unwrap();
+        assert_eq!(imdb.to_string(), "tt1234567");
+
+        let input2 = "tt0234567";
+        let imdb: Imdb = input2.parse().unwrap();
+        assert_eq!(imdb.to_string(), "tt0234567");
     }
 }

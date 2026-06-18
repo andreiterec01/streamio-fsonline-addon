@@ -46,7 +46,7 @@ impl ImdbService {
                 let response: Root = self
                     .client
                     .get(dbg!(format!(
-                        "https://v3-cinemeta.strem.io/meta/{path}/tt{imdb_id}.json"
+                        "https://v3-cinemeta.strem.io/meta/{path}/tt{imdb_id:07}.json"
                     )))
                     .send()
                     .await?

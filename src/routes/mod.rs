@@ -9,7 +9,7 @@ use std::{ops::Deref, sync::Arc};
 
 use crate::{
     AppState, UsesHttps,
-    contracts::{ImdbId, MovieKey, PlayerData, Subtitle},
+    contracts::{Imdb, MovieKey, PlayerData, Subtitle},
     custom_extractor::axum_range::Ranged,
     error::WebResult,
     service::{
@@ -73,7 +73,7 @@ impl Stream {
         subtitles: impl IntoIterator<Item = &'a SubtitleFsonline>,
         uses_https: bool,
         host: &str,
-        imdb: ImdbId,
+        imdb: Imdb,
     ) -> Stream {
         Stream {
             name: "FSonline",
@@ -96,7 +96,7 @@ impl Stream {
         subtitles: impl IntoIterator<Item = &'a SubtitleFsonline>,
         uses_https: bool,
         host: &str,
-        imdb: ImdbId,
+        imdb: Imdb,
     ) -> Stream {
         let protocol = if uses_https { "https" } else { "http" };
         Stream {
@@ -137,7 +137,7 @@ async fn series(
     State(movie): State<ImdbToVideoServer>,
     State(UsesHttps(uses_https)): State<UsesHttps>,
     State(crate::Host(host)): State<crate::Host>,
-    Path(imdb_id): Path<ImdbId>,
+    Path(imdb_id): Path<Imdb>,
 ) -> WebResult<Json<SeriesResponse>> {
     let r = movie.get(imdb_id).await?;
 
@@ -182,7 +182,7 @@ async fn subtitles(
     State(movie): State<ImdbToVideoServer>,
     State(UsesHttps(uses_https)): State<UsesHttps>,
     State(crate::Host(host)): State<crate::Host>,
-    Path((imdb_id, _)): Path<(ImdbId, String)>,
+    Path((imdb_id, _)): Path<(Imdb, String)>,
 ) -> WebResult<Json<SubtitlesList>> {
     let r = movie.get(imdb_id).await?;
 
@@ -200,7 +200,7 @@ async fn subtitles(
 
 #[derive(Deserialize)]
 struct SubtitleQuery {
-    imdb: ImdbId,
+    imdb: Imdb,
     md5: String,
 }
 
