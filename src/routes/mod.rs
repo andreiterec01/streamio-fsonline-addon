@@ -141,35 +141,34 @@ async fn series(
 ) -> WebResult<Json<SeriesResponse>> {
     let r = movie.get(imdb_id).await?;
 
-    let streams = r
+    let original_urls = r.iter().flat_map(|r| {
+        Some(Stream::url(
+            r.data.video.clone()?,
+            r.server_name.clone(),
+            r.data.subtitles.iter(),
+            uses_https,
+            &host,
+            imdb_id,
+        ))
+    });
+
+    let browsers = r
         .iter()
-        .flat_map(|r| {
-            Some(Stream::url(
-                r.data.video.clone()?,
-                r.server_name.clone(),
-                r.data.subtitles.iter(),
-                uses_https,
-                &host,
-                imdb_id,
-            ))
-        })
-        .chain(
-            r.iter()
-                .map(|r| Stream::external_url(r.iframe_player.clone(), &r.server_name)),
-        )
-        .chain(r.iter().flat_map(|r| {
-            if r.data.video.is_none() {
-                return None;
-            }
-            Some(Stream::local_player_url(
-                r.server_name.clone(),
-                r.data.subtitles.iter(),
-                uses_https,
-                &host,
-                imdb_id,
-            ))
-        }))
-        .collect();
+        .map(|r| Stream::external_url(r.iframe_player.clone(), &r.server_name));
+
+    let local_players = r.iter().flat_map(|r| {
+        if r.data.video.is_none() {
+            return None;
+        }
+        Some(Stream::local_player_url(
+            r.server_name.clone(),
+            r.data.subtitles.iter(),
+            uses_https,
+            &host,
+            imdb_id,
+        ))
+    });
+    let streams = local_players.chain(original_urls).chain(browsers).collect();
     Ok(Json(SeriesResponse { streams }))
 }
 
