@@ -27,7 +27,10 @@ pub fn routes() -> Router<AppState> {
         .route("/stream/movie/{imdb_id}", get(series))
         .route("/subtitles/series/{imdb_id}/{filename}", get(subtitles))
         .route("/subtitles/movie/{imdb_id}/{filename}", get(subtitles))
-        .route("/v1/api/subtitles/{imdb}/{md5}", get(redirect_subtitles))
+        .route(
+            "/v1/api/subtitles/{imdb}/{md5}/subtitle.vtt",
+            get(redirect_subtitles),
+        )
         .merge(m3u8_routes::routes())
 }
 
@@ -200,7 +203,7 @@ async fn subtitles(
 #[derive(Deserialize)]
 struct SubtitleQuery {
     imdb: Imdb,
-    md5: String,
+    md5: uuid::Uuid,
 }
 
 async fn redirect_subtitles(
@@ -213,10 +216,6 @@ async fn redirect_subtitles(
     // StreamMapper<impl futures::stream::Stream<Item = std::io::Result<axum::body::Bytes>>>,
     Ranged,
 )> {
-    let md5 = md5
-        .strip_suffix(".vtt")
-        .context("Suffix .vtt was missing")?;
-
     let r = movie.get(imdb).await?;
 
     let subtitle = r

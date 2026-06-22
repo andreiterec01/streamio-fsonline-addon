@@ -31,7 +31,7 @@ pub struct Subtitle {
     /**
      * Unique identifier for each subtitle, if you have more than one subtitle with the same language, the id will differentiate them.
      */
-    // id: uuid::Uuid,
+    id: uuid::Uuid,
     /**
      * Url to the subtitle file.
      */
@@ -50,11 +50,12 @@ impl Subtitle {
         imdb: Imdb,
     ) -> Self {
         let protocol = if uses_https { "https" } else { "http" };
+        let id = fsonline_subtitle.md5();
         Self {
-            // id: uuid::Uuid::new_v4(),
+            id,
             url: format!(
-                "{protocol}://{host}/v1/api/subtitles/{imdb}/{}.vtt",
-                fsonline_subtitle.md5()
+                "{protocol}://{host}/v1/api/subtitles/{imdb}/{}/subtitle.vtt",
+                id
             ),
             lang: fsonline_subtitle.lang,
         }

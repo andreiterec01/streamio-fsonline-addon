@@ -166,8 +166,9 @@ pub struct SubtitleFsonline {
 }
 
 impl SubtitleFsonline {
-    pub fn md5(&self) -> String {
-        format!("{:x}", md5::compute(self.url.as_bytes()))
+    pub fn md5(&self) -> uuid::Uuid {
+        let r = md5::compute(self.url.as_bytes());
+        uuid::Uuid::from_bytes(*r)
     }
 }
 
