@@ -4,7 +4,7 @@ use anyhow::Context;
 use axum::body::Bytes;
 use foyer::{
     BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder,
-    HybridCachePolicy, HybridCacheProperties, Location, RecoverMode,
+    HybridCachePolicy, HybridCacheProperties, Location, PsyncIoEngineConfig, RecoverMode,
 };
 use futures::{StreamExt, TryStreamExt};
 use m3u8_rs::MediaPlaylist;
@@ -289,12 +289,12 @@ impl LocalPlayer {
             .with_recover_mode(RecoverMode::Quiet)
             .with_compression(foyer::Compression::Lz4)
             // use block-based disk cache engine with default configuration
-            .with_engine_config(BlockEngineConfig::new(device))
+            .with_engine_config(BlockEngineConfig::new(device.clone()))
             .build()
             .await?;
 
         let device2 = FsDeviceBuilder::new("./cache-timestamps")
-            .with_capacity(1024 * 1024 * 2)
+            .with_capacity(1024 * 1024 * 512)
             .build()?;
 
         let segments_time_cache: HybridCache<SegmentId, f32> = HybridCacheBuilder::new()
@@ -555,6 +555,7 @@ impl LocalPlayer {
             segments.push(SegmentsTime {
                 duration: segment.start_time - last_segment_time,
                 segments_range: last_segment_index..segment.segment_index + 1,
+                start_time: segment.start_time,
             });
             last_segment_index = segment.segment_index + 1;
             last_segment_time = segment.start_time;
@@ -562,6 +563,7 @@ impl LocalPlayer {
         segments.push(SegmentsTime {
             segments_range: last_segment_index..segments_len,
             duration: movie_duration - last_segment_time,
+            start_time: last_segment_time,
         });
         println!("Returning segments {segments:?}");
         Ok(segments)
@@ -627,6 +629,7 @@ impl LocalPlayer {
 pub struct SegmentsTime {
     pub segments_range: std::ops::Range<usize>,
     pub duration: f32,
+    pub start_time: f32,
 }
 
 struct OneSegmentTime {

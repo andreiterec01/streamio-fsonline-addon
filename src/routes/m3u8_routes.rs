@@ -4,6 +4,7 @@ use axum::{
     response::IntoResponse,
 };
 use axum_extra::TypedHeader;
+use chrono::NaiveTime;
 use futures::StreamExt;
 use hyper::HeaderMap;
 use itertools::Itertools;
@@ -94,7 +95,6 @@ async fn create_new_playlist(
 
     playlist.segments.clear();
     for segments in segments_data {
-        // This is incorrect, because fsonline returns incorrect durations
         let uri = format!(
             "{protocol}://{host}/v1/api/{server_name}/{imdb}/m3u8/segments/{segment_start}/{segment_end}",
             server_name = key.server_name,
@@ -110,7 +110,13 @@ async fn create_new_playlist(
 
         playlist.segments.push(created_segment);
     }
-
+    let max_duration = playlist
+        .segments
+        .iter()
+        .map(|s| s.duration)
+        .max_by(|a, b| a.total_cmp(b))
+        .unwrap_or(10.);
+    playlist.target_duration = max_duration.ceil() as u64;
     Ok(playlist)
 }
 
