@@ -10,7 +10,7 @@ use clap::Parser;
 use time::macros::format_description;
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, services::ServeFile};
-use tracing_subscriber::fmt::time::LocalTime;
+use tracing_subscriber::{EnvFilter, fmt::time::LocalTime};
 
 use crate::service::{
     ImdbToVideoServer,
@@ -27,6 +27,7 @@ mod error;
 mod mw;
 mod routes;
 mod service;
+mod ts_parser;
 #[derive(Clone)]
 pub struct UsesHttps(pub bool);
 
@@ -49,8 +50,10 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     let args = args::Args::parse();
 
+    let filter = dbg!(EnvFilter::from_default_env());
     let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stderr());
     tracing_subscriber::fmt()
+        .with_env_filter(filter)
         .with_writer(non_blocking)
         .with_timer(LocalTime::new(format_description!(
             "[day]/[month] [hour]:[minute]:[second].[subsecond digits:3]"

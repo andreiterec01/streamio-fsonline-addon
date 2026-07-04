@@ -6,11 +6,15 @@ use foyer::{
     BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder,
     HybridCachePolicy, HybridCacheProperties, Location, RecoverMode,
 };
+use futures::{StreamExt, TryStreamExt};
+use m3u8_rs::MediaPlaylist;
+use mpeg2ts_reader::packet::Packet;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
-use crate::{contracts::Imdb, service::ImdbToVideoServer};
+use crate::{contracts::Imdb, service::ImdbToVideoServer, ts_parser};
 
+#[derive(Clone)]
 pub struct M3U8Data {
     pub master: m3u8_rs::MasterPlaylist,
     pub playlist: m3u8_rs::MediaPlaylist,
@@ -73,6 +77,7 @@ pub struct LocalPlayer {
     client: reqwest::Client,
     m3u8_master_files: moka::future::Cache<M3U8CacheKey, Arc<M3U8Data>>,
     segments_data: HybridCache<SegmentId, hyper::body::Bytes>,
+    segments_time_cache: HybridCache<SegmentId, f32>,
     parallelism_count: usize,
     send_to_cache: tokio::sync::mpsc::UnboundedSender<LoadCacheRequest>,
     imdb_to_video_service: ImdbToVideoServer,
@@ -84,6 +89,7 @@ impl Clone for LocalPlayer {
             client: self.client.clone(),
             m3u8_master_files: self.m3u8_master_files.clone(),
             segments_data: self.segments_data.clone(),
+            segments_time_cache: self.segments_time_cache.clone(),
             parallelism_count: self.parallelism_count,
             send_to_cache: self.send_to_cache.clone(),
             imdb_to_video_service: self.imdb_to_video_service.clone(),
@@ -287,6 +293,22 @@ impl LocalPlayer {
             .build()
             .await?;
 
+        let device2 = FsDeviceBuilder::new("./cache-timestamps")
+            .with_capacity(1024 * 1024 * 2)
+            .build()?;
+
+        let segments_time_cache: HybridCache<SegmentId, f32> = HybridCacheBuilder::new()
+            .with_policy(HybridCachePolicy::WriteOnEviction)
+            .memory(memory_segments_cache_size)
+            .with_weighter(|key: &SegmentId, value: &f32| key.size() + size_of_val(value))
+            .storage()
+            .with_recover_mode(RecoverMode::Quiet)
+            .with_compression(foyer::Compression::None)
+            // use block-based disk cache engine with default configuration
+            .with_engine_config(BlockEngineConfig::new(device2))
+            .build()
+            .await?;
+
         let m3u8_master_files = moka::future::CacheBuilder::new(master_cache_size_bytes)
             .weigher(weigher)
             .time_to_live(cache_ttl)
@@ -311,6 +333,7 @@ impl LocalPlayer {
                 .weigher(weigher)
                 .time_to_live(cache_ttl)
                 .build(),
+            segments_time_cache,
             segments_data,
             parallelism_count,
             send_to_cache: tx,
@@ -388,6 +411,162 @@ impl LocalPlayer {
         }
     }
 
+    pub async fn compute_m3u8_real_segments_duration(
+        &self,
+        m3u8_key: &M3U8CacheKey,
+    ) -> anyhow::Result<Vec<SegmentsTime>> {
+        let m3u8 = self.get_m3u8(m3u8_key).await?;
+
+        let mut playlist = m3u8.playlist.clone();
+        let movie_duration: f32 = m3u8.playlist.segments.iter().map(|s| s.duration).sum();
+        let segments_len = m3u8.playlist.segments.len();
+        let mut last_segment_time = -1000.;
+
+        let mut one_segment_times = Vec::new();
+        for (index, segment) in playlist.segments.iter_mut().enumerate() {
+            let id = SegmentId {
+                m3u8: m3u8_key.clone(),
+                segment_index: index,
+            };
+            #[derive(thiserror::Error, Debug)]
+            enum SegmentTimeError {
+                #[error("The time requested was too early")]
+                TooEarly,
+                #[error(transparent)]
+                Other(#[from] anyhow::Error),
+            }
+
+            let r = self
+                .segments_time_cache
+                .get_or_fetch(&id.clone(), move || {
+                    let segments_data = self.segments_data.clone();
+                    let client = self.client.clone();
+                    let segment_uri = segment.uri.clone();
+                    async move {
+                        let r = segments_data.get(&id).await.map_err(anyhow::Error::from)?;
+                        match r {
+                            Some(v) => {
+                                let mut parser = ts_parser::TsStartTimeParser::new();
+                                match parser.parse_packets(v.value().clone()) {
+                                    Some(timestamp) => Ok(timestamp),
+                                    None => {
+                                        return Err(SegmentTimeError::Other(anyhow::anyhow!(
+                                            "The timestamp was not found"
+                                        )));
+                                    }
+                                }
+                            }
+                            None => {
+                                let segment_seconds = async {
+                                    for _ in 0..10 {
+                                        let f = async |range: std::ops::Range<usize>| {
+                                            let mut parser = ts_parser::TsStartTimeParser::new();
+                                            let response = client
+                                                .get(&segment_uri)
+                                                .header(
+                                                    reqwest::header::RANGE,
+                                                    format!(
+                                                        "bytes={}-{}",
+                                                        range.start * Packet::SIZE,
+                                                        range.end * Packet::SIZE
+                                                    ),
+                                                )
+                                                .send()
+                                                .await?
+                                                .error_for_status()?;
+                                            // response.headers().get(reqwest::header::CONTENT_LENGTH);
+                                            let mut bytes_stream = response.bytes_stream();
+                                            let mut duration = None;
+                                            while let Some(bytes) = bytes_stream.try_next().await? {
+                                                if let Some(seconds) = parser.parse_packets(bytes) {
+                                                    duration = Some(seconds);
+                                                    break;
+                                                }
+                                            }
+                                            tracing::error!("The number of seconds for segment {index}: {duration:?}");
+                                            anyhow::Ok(duration)
+                                        };
+                                        match f(0..3).await {
+                                            Ok(Some(duration)) => {
+                                                return Ok(duration);
+                                            }
+                                            Ok(None) => {
+                                                let duration = f(3..10).await?;
+                                                if let Some(time) = duration {
+                                                    tracing::error!("Got it in the 3..10 segments!!!");
+                                                    return Ok(time);
+                                                } else {
+                                                    anyhow::bail!("Can't find the time even in segments 3..10");
+                                                }
+                                            }
+
+                                            Err(e) => {
+                                                tracing::error!("Error received: {e:?}");
+                                                tokio::time::sleep(Duration::from_secs(2)).await;
+                                            }
+                                        }
+                                    }
+                                    anyhow::bail!("Too many retries");
+                                };
+
+                                let r = segment_seconds.await?;
+                                Ok(r)
+                            }
+                        }
+                    }
+                })
+                .await;
+            match r {
+                Ok(timestamp) => {
+                    let segment_time = OneSegmentTime {
+                        segment_index: index,
+                        start_time: *timestamp.value(),
+                    };
+                    last_segment_time = segment_time.start_time;
+                    one_segment_times.push(segment_time);
+                }
+                Err(e) => {
+                    let source = e
+                        .source()
+                        .expect("The source should be present")
+                        .downcast_ref::<SegmentTimeError>()
+                        .expect("Should be an error of type SegmentTimeError");
+                    match source {
+                        SegmentTimeError::TooEarly => {}
+                        SegmentTimeError::Other(e) => {
+                            tracing::error!("Failed to get segment timestamp: {e:?}");
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut last_segment_index = 0;
+        let mut last_segment_time = if let Some(first) = one_segment_times.first()
+            && first.segment_index == 0
+        {
+            first.start_time
+        } else {
+            0.
+        };
+        let mut segments = Vec::new();
+
+        for segment in one_segment_times.into_iter().skip(1) {
+            segments.push(SegmentsTime {
+                duration: segment.start_time - last_segment_time,
+                segments_range: last_segment_index..segment.segment_index + 1,
+            });
+            last_segment_index = segment.segment_index + 1;
+            last_segment_time = segment.start_time;
+        }
+        segments.push(SegmentsTime {
+            segments_range: last_segment_index..segments_len,
+            duration: movie_duration - last_segment_time,
+        });
+        println!("Returning segments {segments:?}");
+        Ok(segments)
+    }
+
     // TODO: find a way to fix the cache duration
     pub async fn get_m3u8(&self, m3u8_key: &M3U8CacheKey) -> anyhow::Result<Arc<M3U8Data>> {
         Self::get_m3u8_inner(
@@ -437,9 +616,22 @@ impl LocalPlayer {
     }
 
     pub async fn close(&self) -> anyhow::Result<()> {
-        self.segments_data.close().await?;
+        let (r1, r2) = tokio::join!(self.segments_time_cache.close(), self.segments_data.close());
+        r1?;
+        r2?;
         Ok(())
     }
+}
+
+#[derive(Debug)]
+pub struct SegmentsTime {
+    pub segments_range: std::ops::Range<usize>,
+    pub duration: f32,
+}
+
+struct OneSegmentTime {
+    segment_index: usize,
+    start_time: f32,
 }
 
 #[cfg(test)]

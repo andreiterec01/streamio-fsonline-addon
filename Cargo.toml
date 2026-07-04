@@ -9,6 +9,7 @@ async-trait = "0.1.89"
 axum = { version = "0.8.9", features = ["macros"] }
 axum-extra = { version = "0.12.6", features = ["typed-header"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+bytes = "1.12.0"
 chromiumoxide = "0.9.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive", "env"] }
@@ -20,6 +21,7 @@ itertools = "0.15.0"
 m3u8-rs = "6.0.0"
 md5 = "0.8.0"
 moka = { version = "0.12.15", features = ["future"] }
+mpeg2ts-reader = "0.18.2"
 regex = "1.12.4"
 reqwest = { version = "0.13.4", features = ["form", "gzip", "json", "stream"] }
 scraper = "0.27.0"

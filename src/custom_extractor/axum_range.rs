@@ -152,6 +152,9 @@ pub struct RangedResponse {
 
 impl IntoResponse for RangedResponse {
     fn into_response(self) -> Response {
+        tracing::debug!("Content lenght: {:?}", self.content_length);
+        tracing::debug!("Stream lenght: {}", self.stream.len());
+        tracing::debug!("The range is {:?}", self.content_range);
         let content_range = self.content_range.map(TypedHeader);
         let content_length = TypedHeader(self.content_length);
         let accept_ranges = TypedHeader(AcceptRanges::bytes());
