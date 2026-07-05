@@ -17,9 +17,9 @@ use crate::{
 pub(super) fn routes() -> Router<AppState> {
     use axum::routing::*;
     Router::new()
-        .route("/v1/api/{server_name}/{imdb}/master.m3u8", get(m3u8_master))
+        // .route("/v1/api/{server_name}/{imdb}/master.m3u8", get(m3u8_master))
         .route(
-            "/v1/api/{server_name}/{imdb}/m3u8/playlist.m3u8",
+            "/v1/api/{server_name}/{imdb}/playlist.m3u8",
             get(m3u8_playlist),
         )
         .route(
@@ -61,7 +61,7 @@ async fn m3u8_master(
             continue;
         }
         v.uri = format!(
-            "{protocol}://{host}/v1/api/{server_name}/{imdb}/m3u8/playlist.m3u8",
+            "{protocol}://{host}/v1/api/{server_name}/{imdb}/playlist.m3u8",
             server_name = key.server_name,
             imdb = key.imdb
         );
@@ -90,6 +90,7 @@ async fn m3u8_playlist(
     let metadata = local_player.get_m3u8(&key).await?;
 
     let mut playlist = metadata.playlist.clone();
+    playlist.media_sequence = 0;
     let protocol = if uses_https { "https" } else { "http" };
     for (segment_number, v) in playlist.segments.iter_mut().enumerate() {
         v.uri = format!(
