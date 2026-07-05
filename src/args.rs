@@ -22,4 +22,7 @@ pub struct Args {
 
     #[clap(long, env, default_value_t = 1024*15)]
     pub file_segments_cache_size_mb: usize,
+
+    #[clap(long, env, default_value_t = 10)]
+    pub cache_next_segments: usize,
 }

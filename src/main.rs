@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
         master_cache_size_bytes: args.master_cache_size,
         memory_segments_cache_size: args.memory_segments_cache_size,
         file_segments_cache_size: args.file_segments_cache_size_mb * 1024 * 1024,
-        cache_next_seconds_on_disk: 300,
+        cache_next_segments: args.cache_next_segments,
         parallelism_count: 4,
         imdb_to_video_service: imdb_to_video_server.clone(),
     };

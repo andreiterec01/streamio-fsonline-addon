@@ -105,7 +105,7 @@ impl Stream {
         Stream {
             name: "FSonline local player",
             url: Some(
-                format!("{protocol}://{host}/v1/api/{server_name}/{imdb}/master.m3u8").into(),
+                format!("{protocol}://{host}/v1/api/{server_name}/{imdb}/playlist.m3u8").into(),
             ),
             title: server_name,
             behavior_hints: Some(BehaviourHints {

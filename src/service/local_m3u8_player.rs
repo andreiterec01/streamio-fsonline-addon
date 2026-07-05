@@ -4,10 +4,9 @@ use anyhow::Context;
 use axum::body::Bytes;
 use foyer::{
     BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder,
-    HybridCachePolicy, HybridCacheProperties, Location, PsyncIoEngineConfig, RecoverMode,
+    HybridCachePolicy, HybridCacheProperties, Location, RecoverMode,
 };
-use futures::{StreamExt, TryStreamExt};
-use m3u8_rs::MediaPlaylist;
+use futures::TryStreamExt;
 use mpeg2ts_reader::packet::Packet;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -259,7 +258,7 @@ pub struct LocalPlayerConfig<'a> {
     pub file_segments_cache_size: usize,
     pub memory_segments_cache_size: usize,
     pub parallelism_count: usize,
-    pub cache_next_seconds_on_disk: usize,
+    pub cache_next_segments: usize,
     pub imdb_to_video_service: ImdbToVideoServer,
 }
 
@@ -273,8 +272,8 @@ impl LocalPlayer {
             file_segments_cache_size,
             memory_segments_cache_size,
             parallelism_count,
-            cache_next_seconds_on_disk,
             imdb_to_video_service,
+            cache_next_segments,
         }: LocalPlayerConfig<'_>,
     ) -> anyhow::Result<Self> {
         let device = FsDeviceBuilder::new(directory_cache)
@@ -303,7 +302,7 @@ impl LocalPlayer {
             .with_weighter(|key: &SegmentId, value: &f32| key.size() + size_of_val(value))
             .storage()
             .with_recover_mode(RecoverMode::Quiet)
-            .with_compression(foyer::Compression::None)
+            .with_compression(foyer::Compression::Lz4)
             // use block-based disk cache engine with default configuration
             .with_engine_config(BlockEngineConfig::new(device2))
             .build()
@@ -316,11 +315,10 @@ impl LocalPlayer {
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-        // TODO: make this configurable
         tokio::spawn(load_cache(
             segments_data.clone(),
             rx,
-            30,
+            cache_next_segments,
             parallelism_count,
             m3u8_master_files.clone(),
             imdb_to_video_service.clone(),
@@ -415,14 +413,22 @@ impl LocalPlayer {
         &self,
         m3u8_key: &M3U8CacheKey,
     ) -> anyhow::Result<Vec<SegmentsTime>> {
+        const MAX_DURATION_BETWEEN_SEGMENTS: f32 = 60.;
+
         let m3u8 = self.get_m3u8(m3u8_key).await?;
 
         let mut playlist = m3u8.playlist.clone();
         let movie_duration: f32 = m3u8.playlist.segments.iter().map(|s| s.duration).sum();
         let segments_len = m3u8.playlist.segments.len();
-        let mut last_segment_time = -1000.;
-
+        // TODO: setting an initial high value to provoke an initial update
+        let mut estimated_duration_since_last_segment = MAX_DURATION_BETWEEN_SEGMENTS + 1.;
         let mut one_segment_times = Vec::new();
+        _ = self
+            .get_segment(SegmentId {
+                m3u8: m3u8_key.clone(),
+                segment_index: 0,
+            })
+            .await?;
         for (index, segment) in playlist.segments.iter_mut().enumerate() {
             let id = SegmentId {
                 m3u8: m3u8_key.clone(),
@@ -436,6 +442,7 @@ impl LocalPlayer {
                 Other(#[from] anyhow::Error),
             }
 
+            estimated_duration_since_last_segment += segment.duration;
             let r = self
                 .segments_time_cache
                 .get_or_fetch(&id.clone(), move || {
@@ -483,7 +490,6 @@ impl LocalPlayer {
                                                     break;
                                                 }
                                             }
-                                            tracing::error!("The number of seconds for segment {index}: {duration:?}");
                                             anyhow::Ok(duration)
                                         };
                                         match f(0..3).await {
@@ -493,10 +499,14 @@ impl LocalPlayer {
                                             Ok(None) => {
                                                 let duration = f(3..10).await?;
                                                 if let Some(time) = duration {
-                                                    tracing::error!("Got it in the 3..10 segments!!!");
+                                                    tracing::error!(
+                                                        "Got it in the 3..10 segments!!!"
+                                                    );
                                                     return Ok(time);
                                                 } else {
-                                                    anyhow::bail!("Can't find the time even in segments 3..10");
+                                                    anyhow::bail!(
+                                                        "Can't find the time even in segments 3..10"
+                                                    );
                                                 }
                                             }
 
@@ -508,9 +518,14 @@ impl LocalPlayer {
                                     }
                                     anyhow::bail!("Too many retries");
                                 };
-
-                                let r = segment_seconds.await?;
-                                Ok(r)
+                                if estimated_duration_since_last_segment
+                                    > MAX_DURATION_BETWEEN_SEGMENTS
+                                {
+                                    let r = segment_seconds.await?;
+                                    Ok(r)
+                                } else {
+                                    Err(SegmentTimeError::TooEarly)
+                                }
                             }
                         }
                     }
@@ -522,10 +537,13 @@ impl LocalPlayer {
                         segment_index: index,
                         start_time: *timestamp.value(),
                     };
-                    last_segment_time = segment_time.start_time;
+                    estimated_duration_since_last_segment = 0.;
                     one_segment_times.push(segment_time);
                 }
                 Err(e) => {
+                    if index == 0 {
+                        anyhow::bail!("Failed to get the timestamp for the first segment: {e:?}");
+                    }
                     let source = e
                         .source()
                         .expect("The source should be present")
@@ -543,31 +561,19 @@ impl LocalPlayer {
 
         let mut segments = Vec::new();
 
-        // TODO: add a check if the first segment is missing. Maybe we should error if we can't download the first segment
         for i in 0..one_segment_times.len() - 1 {
             let segment = SegmentsTime {
                 duration: one_segment_times[i + 1].start_time - one_segment_times[i].start_time,
-                start_time: one_segment_times[i].start_time,
                 segments_range: one_segment_times[i].segment_index
                     ..one_segment_times[i + 1].segment_index,
             };
             segments.push(segment);
-
-            // segments.push(SegmentsTime {
-            //     duration: segment.start_time - last_segment_time,
-            //     segments_range: last_segment_index..segment.segment_index + 1,
-            //     start_time: segment.start_time,
-            // });
-            // last_segment_index = segment.segment_index + 1;
-            // last_segment_time = segment.start_time;
         }
         let last_segment = one_segment_times.last().unwrap();
         segments.push(SegmentsTime {
             segments_range: last_segment.segment_index..segments_len,
             duration: movie_duration - last_segment.start_time,
-            start_time: last_segment.start_time,
         });
-        println!("Returning segments {segments:?}");
         Ok(segments)
     }
 
@@ -631,7 +637,6 @@ impl LocalPlayer {
 pub struct SegmentsTime {
     pub segments_range: std::ops::Range<usize>,
     pub duration: f32,
-    pub start_time: f32,
 }
 
 struct OneSegmentTime {

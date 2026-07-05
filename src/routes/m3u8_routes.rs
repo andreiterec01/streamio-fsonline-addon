@@ -3,18 +3,15 @@ use axum::{
     extract::{Path, State},
     response::IntoResponse,
 };
-use axum_extra::TypedHeader;
-use chrono::NaiveTime;
 use futures::StreamExt;
 use hyper::HeaderMap;
-use itertools::Itertools;
 use m3u8_rs::{MediaPlaylist, MediaSegment};
 use serde::Deserialize;
 
 use crate::{
     AppState, UsesHttps,
     contracts::Imdb,
-    custom_extractor::{DontLogResponse, axum_range::Ranged},
+    custom_extractor::DontLogResponse,
     error::WebResult,
     service::local_m3u8_player::{LocalPlayer, M3U8CacheKey, SegmentId},
 };
@@ -22,9 +19,8 @@ use crate::{
 pub(super) fn routes() -> Router<AppState> {
     use axum::routing::*;
     Router::new()
-        .route("/v1/api/{server_name}/{imdb}/master.m3u8", get(m3u8_master))
         .route(
-            "/v1/api/{server_name}/{imdb}/m3u8/playlist.m3u8",
+            "/v1/api/{server_name}/{imdb}/playlist.m3u8",
             get(m3u8_playlist),
         )
         .route(
@@ -45,42 +41,6 @@ struct SegmentRequest {
     imdb: Imdb,
     segment_start: usize,
     segment_end: usize,
-}
-
-// TODO: extract all the duplicated code
-async fn m3u8_master(
-    local_player: State<LocalPlayer>,
-    Path(path): Path<ServerNameAndImdb>,
-    State(UsesHttps(uses_https)): State<UsesHttps>,
-    State(crate::Host(host)): State<crate::Host>,
-) -> WebResult<(HeaderMap, Vec<u8>)> {
-    let key = M3U8CacheKey {
-        imdb: path.imdb,
-        server_name: path.server_name.into(),
-    };
-    let metadata = local_player.get_m3u8(&key).await?;
-
-    let mut master = metadata.master.clone();
-    let protocol = if uses_https { "https" } else { "http" };
-    for v in master.variants.iter_mut() {
-        if v.is_i_frame {
-            continue;
-        }
-        v.uri = format!(
-            "{protocol}://{host}/v1/api/{server_name}/{imdb}/m3u8/playlist.m3u8",
-            server_name = key.server_name,
-            imdb = key.imdb
-        );
-    }
-    let mut result = std::io::Cursor::new(Vec::new());
-    master.write_to(&mut result).unwrap();
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        hyper::header::CONTENT_TYPE,
-        "application/vnd.apple.mpegurl".parse().unwrap(),
-    );
-
-    Ok((headers, result.into_inner()))
 }
 
 async fn create_new_playlist(

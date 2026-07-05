@@ -118,7 +118,7 @@ impl DemuxContext for PcrDumpDemuxContext {
 struct FirstPtsConsumer;
 
 impl mpeg2ts_reader::pes::ElementaryStreamConsumer<PcrDumpDemuxContext> for FirstPtsConsumer {
-    fn start_stream(&mut self, ctx: &mut PcrDumpDemuxContext) {}
+    fn start_stream(&mut self, _ctx: &mut PcrDumpDemuxContext) {}
     fn begin_packet(
         &mut self,
         ctx: &mut PcrDumpDemuxContext,
@@ -133,9 +133,7 @@ impl mpeg2ts_reader::pes::ElementaryStreamConsumer<PcrDumpDemuxContext> for Firs
             match pts {
                 mpeg2ts_reader::pes::PtsDts::PtsOnly(Ok(pts))
                 | mpeg2ts_reader::pes::PtsDts::Both { pts: Ok(pts), .. } => {
-                    println!("PTS: {}", pts.value());
                     let seconds = pts.value() as f32 / 90_000.0;
-                    println!("Seconds: {:.3}", seconds);
                     ctx.seconds = Some(seconds);
                 }
                 _ => {}
@@ -143,11 +141,11 @@ impl mpeg2ts_reader::pes::ElementaryStreamConsumer<PcrDumpDemuxContext> for Firs
         }
     }
 
-    fn continue_packet(&mut self, ctx: &mut PcrDumpDemuxContext, data: &[u8]) {}
-    fn continuity_error(&mut self, ctx: &mut PcrDumpDemuxContext) {
-        println!("Continuity error");
+    fn continue_packet(&mut self, _ctx: &mut PcrDumpDemuxContext, _data: &[u8]) {}
+    fn continuity_error(&mut self, _ctx: &mut PcrDumpDemuxContext) {
+        tracing::error!("Continuity error");
     }
-    fn end_packet(&mut self, ctx: &mut PcrDumpDemuxContext) {}
+    fn end_packet(&mut self, _ctx: &mut PcrDumpDemuxContext) {}
 }
 
 #[cfg(test)]
