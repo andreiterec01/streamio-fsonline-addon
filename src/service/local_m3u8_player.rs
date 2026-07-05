@@ -541,29 +541,31 @@ impl LocalPlayer {
             }
         }
 
-        let mut last_segment_index = 0;
-        let mut last_segment_time = if let Some(first) = one_segment_times.first()
-            && first.segment_index == 0
-        {
-            first.start_time
-        } else {
-            0.
-        };
         let mut segments = Vec::new();
 
-        for segment in one_segment_times.into_iter().skip(1) {
-            segments.push(SegmentsTime {
-                duration: segment.start_time - last_segment_time,
-                segments_range: last_segment_index..segment.segment_index + 1,
-                start_time: segment.start_time,
-            });
-            last_segment_index = segment.segment_index + 1;
-            last_segment_time = segment.start_time;
+        // TODO: add a check if the first segment is missing. Maybe we should error if we can't download the first segment
+        for i in 0..one_segment_times.len() - 1 {
+            let segment = SegmentsTime {
+                duration: one_segment_times[i + 1].start_time - one_segment_times[i].start_time,
+                start_time: one_segment_times[i].start_time,
+                segments_range: one_segment_times[i].segment_index
+                    ..one_segment_times[i + 1].segment_index,
+            };
+            segments.push(segment);
+
+            // segments.push(SegmentsTime {
+            //     duration: segment.start_time - last_segment_time,
+            //     segments_range: last_segment_index..segment.segment_index + 1,
+            //     start_time: segment.start_time,
+            // });
+            // last_segment_index = segment.segment_index + 1;
+            // last_segment_time = segment.start_time;
         }
+        let last_segment = one_segment_times.last().unwrap();
         segments.push(SegmentsTime {
-            segments_range: last_segment_index..segments_len,
-            duration: movie_duration - last_segment_time,
-            start_time: last_segment_time,
+            segments_range: last_segment.segment_index..segments_len,
+            duration: movie_duration - last_segment.start_time,
+            start_time: last_segment.start_time,
         });
         println!("Returning segments {segments:?}");
         Ok(segments)
