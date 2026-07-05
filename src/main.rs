@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     let args = args::Args::parse();
 
-    let filter = dbg!(EnvFilter::from_default_env());
+    let filter = EnvFilter::from_default_env();
     let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stderr());
     tracing_subscriber::fmt()
         .with_env_filter(filter)

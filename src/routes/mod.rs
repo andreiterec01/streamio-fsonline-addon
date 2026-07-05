@@ -15,6 +15,7 @@ use crate::{
     service::{
         ImdbToVideoServer,
         fsonline_service::{SubtitleFsonline, VideoServer},
+        local_m3u8_player::{LocalPlayer, M3U8CacheKey},
     },
 };
 mod m3u8_routes;
@@ -140,6 +141,7 @@ async fn series(
     State(movie): State<ImdbToVideoServer>,
     State(UsesHttps(uses_https)): State<UsesHttps>,
     State(crate::Host(host)): State<crate::Host>,
+    State(local_player_service): State<LocalPlayer>,
     Path(imdb_id): Path<Imdb>,
 ) -> WebResult<Json<SeriesResponse>> {
     let r = movie.get(imdb_id).await?;
@@ -171,6 +173,38 @@ async fn series(
             imdb_id,
         ))
     });
+    let server_names = r.iter().flat_map(|player| {
+        player
+            .data
+            .video
+            .is_some()
+            .then(|| player.server_name.clone())
+    });
+    for server_name in server_names {
+        let local_player_service = local_player_service.clone();
+        tokio::spawn(async move {
+            match local_player_service
+                .compute_m3u8_real_segments_duration(&M3U8CacheKey {
+                    imdb: imdb_id,
+                    server_name: server_name.clone(),
+                })
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!(
+                        "Finished computing the real segments duration in cache for {}:{}",
+                        imdb_id,
+                        server_name
+                    )
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to compute the real segments durations in cache: {e:?}"
+                    );
+                }
+            }
+        });
+    }
     let streams = local_players.chain(original_urls).chain(browsers).collect();
     Ok(Json(SeriesResponse { streams }))
 }

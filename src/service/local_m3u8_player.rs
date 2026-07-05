@@ -413,7 +413,7 @@ impl LocalPlayer {
         &self,
         m3u8_key: &M3U8CacheKey,
     ) -> anyhow::Result<Vec<SegmentsTime>> {
-        const MAX_DURATION_BETWEEN_SEGMENTS: f32 = 60.;
+        const MAX_DURATION_BETWEEN_SEGMENTS: f32 = 90.;
 
         let m3u8 = self.get_m3u8(m3u8_key).await?;
 
@@ -465,32 +465,69 @@ impl LocalPlayer {
                             }
                             None => {
                                 let segment_seconds = async {
-                                    for _ in 0..10 {
-                                        let f = async |range: std::ops::Range<usize>| {
+                                    #[derive(thiserror::Error, Debug)]
+                                    enum RetryOrStop {
+                                        #[error(transparent)]
+                                        Retry(#[from] anyhow::Error),
+                                        #[error("The function should be stopped")]
+                                        Stop,
+                                    }
+
+                                    let mut content_length = None;
+                                    for _ in 0..6 {
+                                        let mut f = async |range: std::ops::Range<usize>| {
                                             let mut parser = ts_parser::TsStartTimeParser::new();
+                                            let start = range.start * Packet::SIZE;
+                                            let mut end = Some(range.end * Packet::SIZE);
+                                            if let Some(content_length) = content_length {
+                                                if start >= content_length {
+                                                    return Err(RetryOrStop::Stop);
+                                                }
+                                                if end.unwrap() >= content_length {
+                                                    end = None
+                                                }
+                                            }
+                                            let range = match end {
+                                                Some(end) => {
+                                                    format!("bytes={}-{}", start, end)
+                                                }
+                                                None => {
+                                                    format!("bytes={}-", start)
+                                                }
+                                            };
                                             let response = client
                                                 .get(&segment_uri)
-                                                .header(
-                                                    reqwest::header::RANGE,
-                                                    format!(
-                                                        "bytes={}-{}",
-                                                        range.start * Packet::SIZE,
-                                                        range.end * Packet::SIZE
-                                                    ),
-                                                )
+                                                .header(reqwest::header::RANGE, range)
                                                 .send()
-                                                .await?
-                                                .error_for_status()?;
-                                            // response.headers().get(reqwest::header::CONTENT_LENGTH);
+                                                .await
+                                                .map_err(anyhow::Error::from)?
+                                                .error_for_status()
+                                                .map_err(anyhow::Error::from)?;
+                                            if content_length.is_none() {
+                                                let value = response
+                                                    .headers()
+                                                    .get(reqwest::header::CONTENT_RANGE)
+                                                    .and_then(|v| {
+                                                        let value = v.to_str().ok()?;
+                                                        let (_, length) = value.split_once("/")?;
+
+                                                        length.parse::<usize>().ok()
+                                                    });
+                                                content_length = value;
+                                            }
                                             let mut bytes_stream = response.bytes_stream();
                                             let mut duration = None;
-                                            while let Some(bytes) = bytes_stream.try_next().await? {
+                                            while let Some(bytes) = bytes_stream
+                                                .try_next()
+                                                .await
+                                                .map_err(anyhow::Error::from)?
+                                            {
                                                 if let Some(seconds) = parser.parse_packets(bytes) {
                                                     duration = Some(seconds);
                                                     break;
                                                 }
                                             }
-                                            anyhow::Ok(duration)
+                                            Ok(duration)
                                         };
                                         match f(0..3).await {
                                             Ok(Some(duration)) => {
@@ -505,14 +542,17 @@ impl LocalPlayer {
                                                     return Ok(time);
                                                 } else {
                                                     anyhow::bail!(
-                                                        "Can't find the time even in segments 3..10"
+                                                        "Can't find the time packet in segments 3..10"
                                                     );
                                                 }
                                             }
 
-                                            Err(e) => {
+                                            Err(RetryOrStop::Retry(e)) => {
                                                 tracing::error!("Error received: {e:?}");
                                                 tokio::time::sleep(Duration::from_secs(2)).await;
+                                            }
+                                            Err(RetryOrStop::Stop) => {
+                                                anyhow::bail!("Nothing found");
                                             }
                                         }
                                     }

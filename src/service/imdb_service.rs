@@ -45,9 +45,9 @@ impl ImdbService {
                 let path = if is_series { "series" } else { "movie" };
                 let response: Root = self
                     .client
-                    .get(dbg!(format!(
+                    .get(format!(
                         "https://v3-cinemeta.strem.io/meta/{path}/tt{imdb_id:07}.json"
-                    )))
+                    ))
                     .send()
                     .await?
                     .error_for_status()?
