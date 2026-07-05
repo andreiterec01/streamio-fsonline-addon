@@ -1,9 +1,8 @@
 use axum::{
     Router,
     extract::{Path, State},
-    response::IntoResponse,
 };
-use futures::StreamExt;
+use axum_extra::TypedHeader;
 use hyper::HeaderMap;
 use m3u8_rs::{MediaPlaylist, MediaSegment};
 use serde::Deserialize;
@@ -11,7 +10,7 @@ use serde::Deserialize;
 use crate::{
     AppState, UsesHttps,
     contracts::Imdb,
-    custom_extractor::DontLogResponse,
+    custom_extractor::{DontLogResponse, axum_range::Ranged},
     error::WebResult,
     service::local_m3u8_player::{LocalPlayer, M3U8CacheKey, SegmentId},
 };
@@ -121,8 +120,8 @@ async fn m3u8_playlist(
 async fn m3u8_segment(
     local_player: State<LocalPlayer>,
     Path(path): Path<SegmentRequest>,
-    // range: Option<TypedHeader<axum_extra::headers::Range>>,
-) -> WebResult<DontLogResponse<(HeaderMap, RespondeMultipleBytes)>> {
+    range: Option<TypedHeader<axum_extra::headers::Range>>,
+) -> WebResult<DontLogResponse<(HeaderMap, Ranged)>> {
     let mut segments = Vec::new();
     let m3u8 = M3U8CacheKey {
         imdb: path.imdb,
@@ -140,17 +139,8 @@ async fn m3u8_segment(
     let mut headers = HeaderMap::new();
     headers.insert(hyper::header::CONTENT_TYPE, "video/MP2T".parse().unwrap());
 
-    // let range = range.map(|TypedHeader(range)| range);
-
-    // let content = Ranged::new(range, content);
-    Ok(DontLogResponse((headers, RespondeMultipleBytes(segments))))
-}
-
-struct RespondeMultipleBytes(Vec<bytes::Bytes>);
-
-impl IntoResponse for RespondeMultipleBytes {
-    fn into_response(self) -> axum::response::Response {
-        let stream = futures::stream::iter(self.0).map(std::io::Result::Ok);
-        axum::response::Response::new(axum::body::Body::from_stream(stream))
-    }
+    Ok(DontLogResponse((
+        headers,
+        Ranged::new(range.map(|TypedHeader(range)| range), segments),
+    )))
 }

@@ -271,6 +271,7 @@ async fn redirect_subtitles(
         .map_err(anyhow::Error::from)?;
 
     let response = axum::body::Bytes::from(response);
+    let response = vec![response];
     let range = range.map(|TypedHeader(range)| range);
 
     let headers: hyper::HeaderMap = [(

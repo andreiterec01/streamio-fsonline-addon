@@ -56,13 +56,13 @@ use axum_extra::headers::{AcceptRanges, ContentLength, ContentRange, Range};
 /// The main responder type. Implements [`IntoResponse`].
 pub struct Ranged {
     range: Option<Range>,
-    body: axum::body::Bytes,
+    body: Vec<axum::body::Bytes>,
 }
 
 impl Ranged {
     /// Construct a ranged response over any type implementing [`RangeBody`]
     /// and an optional [`Range`] header.
-    pub fn new(range: Option<Range>, body: axum::body::Bytes) -> Self {
+    pub fn new(range: Option<Range>, body: Vec<axum::body::Bytes>) -> Self {
         Ranged { range, body }
     }
 
@@ -70,22 +70,23 @@ impl Ranged {
     /// [`RangedResponse`]. Returns [`RangeNotSatisfiable`] error if requested
     /// range in header was not satisfiable.
     pub fn try_respond(self) -> Result<RangedResponse, RangeNotSatisfiable> {
-        let total_bytes = self.body.len();
+        let total_bytes = self.body.iter().map(|b| b.len()).sum::<usize>();
 
         // we don't support multiple byte ranges, only none or one
         // fortunately, only responding with one of the requested ranges and
         // no more seems to be compliant with the HTTP spec.
-        let range = self
+        let requested_range = self
             .range
-            .and_then(|range| range.satisfiable_ranges(total_bytes as u64).nth(0));
+            .as_ref()
+            .and_then(|range| range.satisfiable_ranges(total_bytes as u64).next());
 
         // pull seek positions out of range header
-        let seek_start = match range {
+        let seek_start = match requested_range {
             Some((Bound::Included(seek_start), _)) => seek_start as usize,
             _ => 0,
         };
 
-        let seek_end_excl = match range {
+        let seek_end_excl = match requested_range {
             // HTTP byte ranges are inclusive, so we translate to exclusive by adding 1:
             Some((_, Bound::Included(end))) => {
                 if end >= total_bytes as u64 {
@@ -108,19 +109,45 @@ impl Ranged {
         }
 
         // if we're good, build the response
-        let content_range = range.map(|_| {
+        let content_range = requested_range.map(|_| {
             ContentRange::bytes(seek_start as u64..seek_end_excl as u64, total_bytes as u64)
                 .expect("ContentRange::bytes cannot panic in this usage")
         });
 
         let content_length = ContentLength((seek_end_excl - seek_start) as u64);
 
-        let stream = self.body.slice(seek_start..seek_end_excl);
+        let body = if requested_range.is_none() {
+            self.body
+        } else {
+            let mut selected = Vec::new();
+            let mut current_offset = 0usize;
+
+            for chunk in self.body.into_iter() {
+                if current_offset >= seek_end_excl {
+                    break;
+                }
+
+                let chunk_start = current_offset;
+                let chunk_end = current_offset + chunk.len();
+                let start = seek_start.saturating_sub(chunk_start);
+                let end = seek_end_excl.saturating_sub(chunk_start);
+                let start = start.min(chunk.len());
+                let end = end.min(chunk.len());
+
+                if start < end {
+                    selected.push(chunk.slice(start..end));
+                }
+
+                current_offset = chunk_end;
+            }
+
+            selected
+        };
 
         Ok(RangedResponse {
             content_range,
             content_length,
-            stream,
+            body,
         })
     }
 }
@@ -147,25 +174,30 @@ impl IntoResponse for RangeNotSatisfiable {
 pub struct RangedResponse {
     pub content_range: Option<ContentRange>,
     pub content_length: ContentLength,
-    pub stream: axum::body::Bytes,
+    pub body: Vec<axum::body::Bytes>,
 }
 
 impl IntoResponse for RangedResponse {
     fn into_response(self) -> Response {
         tracing::debug!("Content lenght: {:?}", self.content_length);
-        tracing::debug!("Stream lenght: {}", self.stream.len());
+        tracing::debug!(
+            "Stream lenght: {}",
+            self.body.iter().map(|chunk| chunk.len()).sum::<usize>()
+        );
         tracing::debug!("The range is {:?}", self.content_range);
         let content_range = self.content_range.map(TypedHeader);
         let content_length = TypedHeader(self.content_length);
         let accept_ranges = TypedHeader(AcceptRanges::bytes());
-        let stream = self.stream;
 
         let status = match content_range {
             Some(_) => StatusCode::PARTIAL_CONTENT,
             None => StatusCode::OK,
         };
 
-        (status, content_range, content_length, accept_ranges, stream).into_response()
+        let body = axum::body::Body::from_stream(futures::stream::iter(
+            self.body.into_iter().map(std::io::Result::Ok),
+        ));
+        (status, content_range, content_length, accept_ranges, body).into_response()
     }
 }
 
