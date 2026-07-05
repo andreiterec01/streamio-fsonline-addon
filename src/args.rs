@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-#[derive(clap::Parser)]
+#[derive(clap::Parser, Debug)]
 pub struct Args {
     #[clap(long, env, default_value_t = 3000)]
     pub port: u16,
@@ -25,4 +25,13 @@ pub struct Args {
 
     #[clap(long, env, default_value_t = 10)]
     pub cache_next_segments: usize,
+
+    #[clap(long, env, default_value_t = 31.)]
+    pub max_segment_duration: f32,
+
+    #[clap(long, env, default_value_t = 9)]
+    pub timeout_waiting_for_playlist_sec: u64,
+
+    #[clap(long, env, default_value_t = 80.)]
+    pub max_segment_duration_after_timeout: f32,
 }

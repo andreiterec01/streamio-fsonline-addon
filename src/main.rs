@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
     // all imdb keys at: https://datasets.imdbws.com/title.basics.tsv.gz
     dotenvy::dotenv().ok();
     let args = args::Args::parse();
-
+    tracing::info!("Running with args {args:?}");
     let filter = EnvFilter::from_default_env();
     let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stderr());
     tracing_subscriber::fmt()
@@ -90,6 +90,9 @@ async fn main() -> anyhow::Result<()> {
         cache_next_segments: args.cache_next_segments,
         parallelism_count: 4,
         imdb_to_video_service: imdb_to_video_server.clone(),
+        max_segment_duration: args.max_segment_duration,
+        max_segment_duration_after_timeout: args.max_segment_duration_after_timeout,
+        timeout_waiting_for_playlist: Duration::from_secs(args.timeout_waiting_for_playlist_sec),
     };
     let local_player = LocalPlayer::new(local_player_config).await?;
     let state = AppState {

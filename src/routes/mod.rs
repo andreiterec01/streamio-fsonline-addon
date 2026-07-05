@@ -182,12 +182,17 @@ async fn series(
     });
     for server_name in server_names {
         let local_player_service = local_player_service.clone();
+
         tokio::spawn(async move {
+            // TODO: make the 60 seconds configurable
             match local_player_service
-                .compute_m3u8_real_segments_duration(&M3U8CacheKey {
-                    imdb: imdb_id,
-                    server_name: server_name.clone(),
-                })
+                .compute_m3u8_real_segments_duration(
+                    &M3U8CacheKey {
+                        imdb: imdb_id,
+                        server_name: server_name.clone(),
+                    },
+                    false,
+                )
                 .await
             {
                 Ok(_) => {
