@@ -94,22 +94,11 @@ async fn m3u8_playlist(
     };
     let metadata = local_player.get_m3u8(&key).await?;
 
-    // let mut playlist = metadata.playlist.clone();
-    // let mut playlist = local_player.compute_m3u8_real_segments(&key).await?;
     let protocol = if uses_https { "https" } else { "http" };
 
     let playlist =
         create_new_playlist(&local_player, protocol, &host, &key, &metadata.playlist).await?;
 
-    // for (segment_number, v) in playlist.segments.iter_mut().enumerate() {
-    //     v.uri = format!(
-    //         "{protocol}://{host}/v1/api/{server_name}/{imdb}/m3u8/segments/{segment_start}/{segment_end}",
-    //         server_name = key.server_name,
-    //         imdb = key.imdb,
-    //         segment_start = segment_number,
-    //         segment_end = segment_number + 1
-    //     );
-    // }
     let mut result = std::io::Cursor::new(Vec::new());
     playlist.write_to(&mut result).unwrap();
     let mut headers = HeaderMap::new();
