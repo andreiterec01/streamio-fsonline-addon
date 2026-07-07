@@ -11,6 +11,7 @@ use mpeg2ts_reader::packet::Packet;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 mod intervals;
+mod time_cache;
 use crate::{
     contracts::Imdb,
     service::{ImdbToVideoServer, local_m3u8_player::intervals::Interval},
@@ -279,6 +280,32 @@ pub struct LocalPlayerConfig<'a> {
     pub timeout_waiting_for_playlist: Duration,
     pub max_segment_duration_after_timeout: f32,
     pub block_size_segments_mb: usize,
+}
+
+struct MyEventListener {
+    segments_time_cache: HybridCache<SegmentId, f32>,
+}
+
+impl foyer::EventListener for MyEventListener {
+    type Key = SegmentId;
+    type Value = hyper::body::Bytes;
+    fn on_leave(&self, reason: foyer::Event, key: &Self::Key, value: &Self::Value)
+    where
+        Self::Key: foyer::Key,
+        Self::Value: foyer::Value,
+    {
+        match reason {
+            foyer::Event::Clear | foyer::Event::Evict => {}
+            foyer::Event::Remove | foyer::Event::Replace => {
+                return;
+            }
+        }
+        let mut parser = ts_parser::TsStartTimeParser::new();
+        let Some(time) = parser.parse_packets(value.clone()) else {
+            return;
+        };
+        self.segments_time_cache.insert(key.clone(), time);
+    }
 }
 
 impl LocalPlayer {
