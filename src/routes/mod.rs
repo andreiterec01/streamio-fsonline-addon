@@ -6,10 +6,11 @@ use axum::{
 use axum_extra::TypedHeader;
 use serde::{Deserialize, Serialize};
 use std::{ops::Deref, sync::Arc};
+use tower_http::services::ServeFile;
 
 use crate::{
     AppState, UsesHttps,
-    contracts::{Imdb, MovieKey, PlayerData, Subtitle},
+    contracts::{Imdb, MovieKey, OptionsBytes, PlayerData, Subtitle},
     custom_extractor::axum_range::Ranged,
     error::WebResult,
     service::{
@@ -18,16 +19,23 @@ use crate::{
         local_m3u8_player::{LocalPlayer, M3U8CacheKey},
     },
 };
-mod m3u8_routes;
+pub mod m3u8_routes;
 
 pub fn routes() -> Router<AppState> {
     use axum::routing::*;
     Router::new()
+        .route_service("/{options}/manifest.json", ServeFile::new(r"manifest.json"))
         .route("/v1/api/season", get(get_movie_url))
-        .route("/stream/series/{imdb_id}", get(series))
-        .route("/stream/movie/{imdb_id}", get(series))
-        .route("/subtitles/series/{imdb_id}/{filename}", get(subtitles))
-        .route("/subtitles/movie/{imdb_id}/{filename}", get(subtitles))
+        .route("/{options}/stream/series/{imdb_id}", get(series))
+        .route("/{options}/stream/movie/{imdb_id}", get(series))
+        .route(
+            "/{options}/subtitles/series/{imdb_id}/{filename}",
+            get(subtitles),
+        )
+        .route(
+            "/{options}/subtitles/movie/{imdb_id}/{filename}",
+            get(subtitles),
+        )
         .route(
             "/v1/api/subtitles/{imdb}/{md5}/subtitle.vtt",
             get(redirect_subtitles),
@@ -35,12 +43,17 @@ pub fn routes() -> Router<AppState> {
         .merge(m3u8_routes::routes())
 }
 
+pub async fn install_ui() -> axum::response::Html<&'static str> {
+    let html_code = include_str!("../../index.html");
+    axum::response::Html(html_code)
+}
+
 #[axum::debug_handler]
 async fn get_movie_url(
     State(movie): State<VideoServer>,
     Form(series): Form<MovieKey>,
 ) -> WebResult<Json<Arc<[PlayerData]>>> {
-    let r = movie.get(&series).await?;
+    let r = movie.get(&series).await?.players;
     Ok(Json(r))
 }
 
@@ -123,12 +136,19 @@ impl Stream {
 
     fn external_url(external_url: Arc<str>, server_name: &str) -> Stream {
         Stream {
+            name: "FSonline browser player",
+            title: format!("{} Server\nThis will play in the browser", server_name).into(),
+            url: None,
+            behavior_hints: None,
+            external_url: Some(external_url),
+            subtitles: Vec::new(),
+        }
+    }
+
+    fn fsonline_url(external_url: Arc<str>) -> Stream {
+        Stream {
             name: "FSonline browser",
-            title: format!(
-                "{} Server\nThis will play in the browser\n{}",
-                server_name, external_url
-            )
-            .into(),
+            title: format!("The fsonline webpage").into(),
             url: None,
             behavior_hints: None,
             external_url: Some(external_url),
@@ -137,43 +157,63 @@ impl Stream {
     }
 }
 
-async fn series(
-    State(movie): State<ImdbToVideoServer>,
-    State(UsesHttps(uses_https)): State<UsesHttps>,
-    State(crate::Host(host)): State<crate::Host>,
-    State(local_player_service): State<LocalPlayer>,
-    Path(imdb_id): Path<Imdb>,
+async fn series_function(
+    movie: ImdbToVideoServer,
+    uses_https: bool,
+    host: Arc<str>,
+    local_player_service: LocalPlayer,
+    options: OptionsBytes,
+    imdb_id: Imdb,
 ) -> WebResult<Json<SeriesResponse>> {
     let r = movie.get(imdb_id).await?;
+    let original_players = if options.contains(OptionsBytes::SHOW_ORIGINAL_PLAYER) {
+        Some(r.players.iter().flat_map(|r| {
+            Some(Stream::url(
+                r.data.video.clone()?,
+                r.server_name.clone(),
+                r.data.subtitles.iter(),
+                uses_https,
+                &host,
+                imdb_id,
+            ))
+        }))
+    } else {
+        None
+    }
+    .into_iter()
+    .flatten();
 
-    let original_urls = r.iter().flat_map(|r| {
-        Some(Stream::url(
-            r.data.video.clone()?,
-            r.server_name.clone(),
-            r.data.subtitles.iter(),
-            uses_https,
-            &host,
-            imdb_id,
-        ))
-    });
+    let browsers = if options.contains(OptionsBytes::BROWSER_PLAYERS) {
+        Some(
+            r.players
+                .iter()
+                .map(|r| Stream::external_url(r.iframe_player.clone(), &r.server_name)),
+        )
+    } else {
+        None
+    }
+    .into_iter()
+    .flatten();
 
-    let browsers = r
-        .iter()
-        .map(|r| Stream::external_url(r.iframe_player.clone(), &r.server_name));
-
-    let local_players = r.iter().flat_map(|r| {
-        if r.data.video.is_none() {
-            return None;
-        }
-        Some(Stream::local_player_url(
-            r.server_name.clone(),
-            r.data.subtitles.iter(),
-            uses_https,
-            &host,
-            imdb_id,
-        ))
-    });
-    let server_names = r.iter().flat_map(|player| {
+    let local_players = if options.contains(OptionsBytes::LOCAL_PLAYER) {
+        Some(r.players.iter().flat_map(|r| {
+            if r.data.video.is_none() {
+                return None;
+            }
+            Some(Stream::local_player_url(
+                r.server_name.clone(),
+                r.data.subtitles.iter(),
+                uses_https,
+                &host,
+                imdb_id,
+            ))
+        }))
+    } else {
+        None
+    }
+    .into_iter()
+    .flatten();
+    let server_names = r.players.iter().flat_map(|player| {
         player
             .data
             .video
@@ -210,8 +250,37 @@ async fn series(
             }
         });
     }
-    let streams = local_players.chain(original_urls).chain(browsers).collect();
+
+    let original_url = if options.contains(OptionsBytes::FSONLINE_LINK) {
+        Some(Stream::fsonline_url(r.fsonline_url.into()))
+    } else {
+        None
+    };
+
+    let streams = local_players
+        .chain(original_url)
+        .chain(original_players)
+        .chain(browsers)
+        .collect();
     Ok(Json(SeriesResponse { streams }))
+}
+
+async fn series(
+    State(movie): State<ImdbToVideoServer>,
+    State(UsesHttps(uses_https)): State<UsesHttps>,
+    State(crate::Host(host)): State<crate::Host>,
+    State(local_player_service): State<LocalPlayer>,
+    Path((options, imdb_id)): Path<(OptionsBytes, Imdb)>,
+) -> WebResult<Json<SeriesResponse>> {
+    series_function(
+        movie,
+        uses_https,
+        host,
+        local_player_service,
+        options,
+        imdb_id,
+    )
+    .await
 }
 
 #[derive(Serialize)]
@@ -223,11 +292,12 @@ async fn subtitles(
     State(movie): State<ImdbToVideoServer>,
     State(UsesHttps(uses_https)): State<UsesHttps>,
     State(crate::Host(host)): State<crate::Host>,
-    Path((imdb_id, _)): Path<(Imdb, String)>,
+    Path((_, imdb_id, _)): Path<(OptionsBytes, Imdb, String)>,
 ) -> WebResult<Json<SubtitlesList>> {
     let r = movie.get(imdb_id).await?;
 
     let subtitles = r
+        .players
         .iter()
         .flat_map(|r| {
             r.data
@@ -258,6 +328,7 @@ async fn redirect_subtitles(
     let r = movie.get(imdb).await?;
 
     let subtitle = r
+        .players
         .iter()
         .flat_map(|player| player.data.subtitles.iter())
         .find(|s| s.md5() == md5)

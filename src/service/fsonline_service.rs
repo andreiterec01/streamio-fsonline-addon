@@ -31,6 +31,11 @@ fn normalize_movie_name(movie: &str) -> String {
     movie.trim().to_lowercase().replace(" ", "-")
 }
 
+pub struct VideoServerResponse {
+    pub players: Arc<[PlayerData]>,
+    pub fsonline_url: String,
+}
+
 impl VideoServer {
     pub async fn new(
         client: reqwest::Client,
@@ -45,72 +50,95 @@ impl VideoServer {
         })
     }
 
-    pub async fn get(&self, movie: &MovieKey) -> anyhow::Result<Arc<[PlayerData]>> {
-        let players = self.cache.try_get_with_by_ref(movie, async {
-            let MovieKey { movie, data } = movie;
-            let movie = normalize_movie_name(movie);
+    pub async fn get(&self, key: &MovieKey) -> anyhow::Result<VideoServerResponse> {
+        let MovieKey { movie, data } = key;
+        let movie = normalize_movie_name(movie);
 
-            let initial_url = match data {
-                crate::contracts::MovieOrSeriesDataKey::Movie { release_year } => {
-                    format!(
-                        "https://www3.fsonline.app/film/{movie}-{release_year}/"
-                    )
-                },
-                crate::contracts::MovieOrSeriesDataKey::Series(SeriesData { season, episode }) => {
-                    format!(
-                        "https://www3.fsonline.app/episoade/{movie}-sezonul-{season}-episodul-{episode}/"
-                    )
-                }
-            };
+        let initial_url = match data {
+            crate::contracts::MovieOrSeriesDataKey::Movie { release_year } => {
+                format!("https://www3.fsonline.app/film/{movie}-{release_year}/")
+            }
+            crate::contracts::MovieOrSeriesDataKey::Series(SeriesData { season, episode }) => {
+                format!(
+                    "https://www3.fsonline.app/episoade/{movie}-sezonul-{season}-episodul-{episode}/"
+                )
+            }
+        };
+        let players = self
+            .cache
+            .try_get_with_by_ref(key, async {
+                let response = self
+                    .client
+                    .get(&initial_url)
+                    .send()
+                    .await?
+                    .error_for_status()?;
+                let body = response.text().await?;
 
+                let movie_id = get_movie_id(body)?;
 
-            let response = self.client.get(initial_url).send().await?.error_for_status()?;
-            let body = response.text().await?;
-
-            let movie_id = get_movie_id(body)?;
-
-            let response = self.client
-                .post("https://www3.fsonline.app/wp-admin/admin-ajax.php")
-                .form(&[("action", "lazy_player"), ("movieID", &movie_id)])
-                .send()
-                .await?
-                .error_for_status()?
-                .text()
-                .await?;
-            let mut players = get_player_options(response);
-            players.retain(|player| !INVALID_BROWSER_SERVERS.contains(&player.server_name.deref()));
-            let players_string = players.iter().map(|p| format!("{}: {}", p.server_name,p.iframe_player)).join("\n");
-            tracing::info!("For {} got the players:\n{}", movie, players_string);
-            let players = players.into_iter().map(async |p|  {
-                if INVALID_SCRAPPING_SERVERS.contains(&p.server_name.deref()) {
-                    return PlayerData {
-                        data: VideoAndSubtitles::default(),
+                let response = self
+                    .client
+                    .post("https://www3.fsonline.app/wp-admin/admin-ajax.php")
+                    .form(&[("action", "lazy_player"), ("movieID", &movie_id)])
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .text()
+                    .await?;
+                let mut players = get_player_options(response);
+                players.retain(|player| {
+                    !INVALID_BROWSER_SERVERS.contains(&player.server_name.deref())
+                });
+                let players_string = players
+                    .iter()
+                    .map(|p| format!("{}: {}", p.server_name, p.iframe_player))
+                    .join("\n");
+                tracing::info!("For {} got the players:\n{}", movie, players_string);
+                let players = players.into_iter().map(async |p| {
+                    if INVALID_SCRAPPING_SERVERS.contains(&p.server_name.deref()) {
+                        return PlayerData {
+                            data: VideoAndSubtitles::default(),
+                            iframe_player: p.iframe_player.into(),
+                            server_name: p.server_name.into(),
+                        };
+                    }
+                    let data = self
+                        .player_scrapper
+                        .get_video(&p)
+                        .await
+                        .inspect_err(|e| {
+                            tracing::warn!(
+                                "Failed to get the video from server {} for {}: {}",
+                                p.server_name,
+                                p.iframe_player,
+                                e
+                            );
+                        })
+                        .ok()
+                        .unwrap_or_default();
+                    PlayerData {
+                        data,
                         iframe_player: p.iframe_player.into(),
-                        server_name: p.server_name.into()
-                    };
-                }
-                let data = self.player_scrapper.get_video(&p).await.inspect_err(|e| {
-                    tracing::warn!("Failed to get the video from server {} for {}: {}", p.server_name,p.iframe_player, e);
-                }).ok().unwrap_or_default();
-                PlayerData {
-                    data,
-                    iframe_player: p.iframe_player.into(),
-                    server_name: p.server_name.into()
-                }
-            });
-            let players = join_all(players).await.into_iter().collect();
+                        server_name: p.server_name.into(),
+                    }
+                });
+                let players = join_all(players).await.into_iter().collect();
 
-            anyhow::Ok(players)
-        }).await.map_err(|e| {
-            match Arc::try_unwrap(e) {
+                anyhow::Ok(players)
+            })
+            .await
+            .map_err(|e| match Arc::try_unwrap(e) {
                 Ok(e) => e,
                 Err(e) => {
                     anyhow::anyhow!("{e}")
                 }
-            }
-        })?;
+            })?;
 
-        Ok(players)
+        Ok(VideoServerResponse {
+            players,
+            fsonline_url: initial_url,
+        })
     }
 }
 

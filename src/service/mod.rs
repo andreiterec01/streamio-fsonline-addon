@@ -1,9 +1,9 @@
-use std::{ops::Deref, sync::Arc};
+use std::ops::Deref;
 
 use crate::{
     contracts::{Imdb, MovieKey, MovieOrSeriesDataKey, PlayerData},
     service::{
-        fsonline_service::{MovieData, VideoServer},
+        fsonline_service::{MovieData, VideoServer, VideoServerResponse},
         imdb_service::ImdbService,
     },
 };
@@ -27,7 +27,7 @@ impl ImdbToVideoServer {
         }
     }
 
-    pub async fn get(&self, imdb_id: Imdb) -> anyhow::Result<Arc<[PlayerData]>> {
+    pub async fn get(&self, imdb_id: Imdb) -> anyhow::Result<VideoServerResponse> {
         let MovieData {
             movie_name,
             release_year,
@@ -57,6 +57,7 @@ impl ImdbToVideoServer {
         let r = self.get(imdb_id).await?;
 
         let player = r
+            .players
             .iter()
             .find(|p| p.server_name.deref() == server_name)
             .cloned();

@@ -9,15 +9,18 @@ use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use clap::Parser;
 use time::macros::format_description;
 use tower::ServiceBuilder;
-use tower_http::{cors::CorsLayer, services::ServeFile};
+use tower_http::cors::CorsLayer;
 use tracing_subscriber::{EnvFilter, fmt::time::LocalTime};
 
-use crate::service::{
-    ImdbToVideoServer,
-    fsonline_service::VideoServer,
-    imdb_service::ImdbService,
-    local_m3u8_player::{LocalPlayer, LocalPlayerConfig},
-    scrappers::{PlayerScrappers, vidmoly::VidmolyScrapper},
+use crate::{
+    routes::install_ui,
+    service::{
+        ImdbToVideoServer,
+        fsonline_service::VideoServer,
+        imdb_service::ImdbService,
+        local_m3u8_player::{LocalPlayer, LocalPlayerConfig},
+        scrappers::{PlayerScrappers, vidmoly::VidmolyScrapper},
+    },
 };
 
 mod args;
@@ -107,14 +110,13 @@ async fn main() -> anyhow::Result<()> {
     let cors_layer = CorsLayer::new()
         .allow_origin(tower_http::cors::Any) // Open access to selected route
         .allow_methods(tower_http::cors::Any);
-
     let router = routes::routes()
+        .route("/install", axum::routing::get(install_ui))
         // .nest_service(
         //     "/frontend",
         //     ServeDir::new(r"../client/build")
         //         .fallback(ServeFile::new(r"../client/build/index.html")),
         // )
-        .route_service("/manifest.json", ServeFile::new(r"manifest.json"))
         .layer(
             ServiceBuilder::new()
                 .layer(axum::middleware::from_fn(mw::log_request_response))

@@ -187,6 +187,43 @@ impl<'de> Deserialize<'de> for Imdb {
     }
 }
 
+bitflags::bitflags! {
+    pub struct OptionsBytes: u8 {
+        const LOCAL_PLAYER = 1;
+        const SHOW_ORIGINAL_PLAYER = 2;
+        const BROWSER_PLAYERS = 4;
+        const FSONLINE_LINK = 8;
+    }
+}
+
+impl Default for OptionsBytes {
+    fn default() -> Self {
+        Self::LOCAL_PLAYER
+    }
+}
+
+impl<'de> Deserialize<'de> for OptionsBytes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        let Some(flags) = Option::<u8>::deserialize(deserializer)? else {
+            return Ok(Self::default());
+        };
+
+        let options = OptionsBytes::from_bits(flags)
+            .ok_or_else(|| D::Error::custom("Invalid flags were set"))?;
+
+        if options.is_empty() {
+            return Err(D::Error::custom("The options were 0"));
+        }
+
+        Ok(options)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::contracts::Imdb;

@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Install Streamio Addon</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: system-ui, sans-serif;
+            background: #121212;
+            color: #fff;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        .container {
+            width: min(600px, 90%);
+            text-align: center;
+        }
+
+        h1 {
+            margin-bottom: .5rem;
+        }
+
+        p {
+            color: #cfcfcf;
+        }
+
+        .options {
+            text-align: left;
+            margin: 2rem auto;
+            display: inline-block;
+        }
+
+        .options label {
+            display: block;
+            margin: .8rem 0;
+            font-size: 1.05rem;
+            cursor: pointer;
+        }
+
+        input[type="checkbox"] {
+            margin-right: .6rem;
+            transform: scale(1.2);
+        }
+
+        .install-btn {
+            display: inline-block;
+            margin-top: 1rem;
+            padding: 16px 40px;
+            background: #6f42c1;
+            color: white;
+            text-decoration: none;
+            border-radius: 10px;
+            font-size: 1.2rem;
+            font-weight: bold;
+        }
+
+        .install-btn:hover {
+            background: #8457da;
+        }
+
+        .url {
+            margin-top: 1.5rem;
+            color: #999;
+            font-family: monospace;
+            word-break: break-all;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <h1>Install Streamio Addon</h1>
+
+        <p>
+            Choose the features you want to enable before installing.
+        </p>
+
+        <div class="options">
+            <label><input type="checkbox" checked value="1"> Show local player</label>
+            <label><input type="checkbox" value="2"> Show players</label>
+            <label><input type="checkbox" value="4"> Show FSOnline players in browser</label>
+            <label><input type="checkbox" value="8"> Show FSOnline website</label>
+        </div>
+
+        <br>
+
+        <a id="installButton" class="install-btn" href="stremio://streamio.aterec.it.com/1/manifest.json">
+            Install
+        </a>
+
+        <div class="url" id="manifestUrl">
+            stremio://streamio.aterec.it.com/0/manifest.json
+        </div>
+    </div>
+
+    <script>
+        const checkboxes = document.querySelectorAll("input[type=checkbox]");
+        const button = document.getElementById("installButton");
+        const urlText = document.getElementById("manifestUrl");
+
+        const validation = document.createElement("div");
+        validation.style.color = "#ff8080";
+        validation.style.marginTop = "1rem";
+        validation.textContent = "Please select at least one option.";
+        urlText.parentNode.insertBefore(validation, urlText);
+
+        function updateLink() {
+            let value = 0;
+
+            checkboxes.forEach(cb => {
+                if (cb.checked) {
+                    value += Number(cb.value);
+                }
+            });
+
+            if (value === 0) {
+                button.removeAttribute("href");
+                button.style.opacity = "0.5";
+                button.style.pointerEvents = "none";
+
+                validation.style.display = "block";
+                urlText.textContent = "Select at least one option.";
+            } else {
+                const url = `stremio://streamio.aterec.it.com/${value}/manifest.json`;
+
+                button.href = url;
+                button.style.opacity = "1";
+                button.style.pointerEvents = "auto";
+
+                validation.style.display = "none";
+                urlText.textContent = url;
+            }
+        }
+
+        checkboxes.forEach(cb => cb.addEventListener("change", updateLink));
+
+        updateLink();
+    </script>
+
+</body>
+
+</html>
