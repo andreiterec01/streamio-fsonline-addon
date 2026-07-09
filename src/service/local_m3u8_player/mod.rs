@@ -229,10 +229,13 @@ async fn load_cache(
             m3u8: segment.m3u8,
             segment_index: segment.range.start,
         };
-        let cache_location = if segment.priority == 0 {
-            Location::Default
-        } else {
+        if segments_cache.contains(&id) {
+            continue;
+        }
+        let cache_location = if segment.priority > 15 {
             Location::OnDisk
+        } else {
+            Location::Default
         };
         let client = client.clone();
         let uri = segment_data.uri.clone();
@@ -275,6 +278,7 @@ pub struct LocalPlayerConfig<'a> {
     pub max_segment_duration: f32,
     pub timeout_waiting_for_playlist: Duration,
     pub max_segment_duration_after_timeout: f32,
+    pub block_size_segments_mb: usize,
 }
 
 impl LocalPlayer {
@@ -292,6 +296,7 @@ impl LocalPlayer {
             max_segment_duration,
             max_segment_duration_after_timeout,
             timeout_waiting_for_playlist,
+            block_size_segments_mb,
         }: LocalPlayerConfig<'_>,
     ) -> anyhow::Result<Self> {
         let device = FsDeviceBuilder::new(directory_cache)
@@ -306,7 +311,10 @@ impl LocalPlayer {
             .with_recover_mode(RecoverMode::Quiet)
             .with_compression(foyer::Compression::Lz4)
             // use block-based disk cache engine with default configuration
-            .with_engine_config(BlockEngineConfig::new(device.clone()))
+            .with_engine_config(
+                BlockEngineConfig::new(device.clone())
+                    .with_block_size(block_size_segments_mb * 1024 * 1024),
+            )
             .build()
             .await?;
 

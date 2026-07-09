@@ -52,7 +52,6 @@ async fn main() -> anyhow::Result<()> {
     // all imdb keys at: https://datasets.imdbws.com/title.basics.tsv.gz
     dotenvy::dotenv().ok();
     let args = args::Args::parse();
-    tracing::info!("Running with args {args:?}");
     let filter = EnvFilter::from_default_env();
     let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stderr());
     tracing_subscriber::fmt()
@@ -62,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
             "[day]/[month] [hour]:[minute]:[second].[subsecond digits:3]"
         )))
         .init();
+    tracing::info!("Running with args {args:?}");
 
     let config = match (args.ssl_cert_path, args.ssl_key_path) {
         (Some(cert_path), Some(key_path)) => {
@@ -85,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
     let local_player_config = LocalPlayerConfig {
         // TODO: make this configurable
         cache_ttl: Duration::from_secs(3600 * 4),
+        block_size_segments_mb: args.cache_block_size_mb,
         client: client.clone(),
         directory_cache: &args.cache_path,
         master_cache_size_bytes: args.master_cache_size,

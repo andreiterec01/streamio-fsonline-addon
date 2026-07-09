@@ -26,6 +26,9 @@ pub struct Args {
     #[clap(long, env, default_value_t = 10)]
     pub cache_next_segments: usize,
 
+    #[clap(long, env, default_value_t = 16)]
+    pub cache_block_size_mb: usize,
+
     #[clap(long, env, default_value_t = 31.)]
     pub max_segment_duration: f32,
 
