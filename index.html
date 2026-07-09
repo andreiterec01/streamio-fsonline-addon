@@ -39,18 +39,83 @@
             text-align: left;
             margin: 2rem auto;
             display: inline-block;
+            width: min(100%, 500px);
         }
 
-        .options label {
-            display: block;
-            margin: .8rem 0;
+        .option {
+            display: flex;
+            align-items: flex-start;
+            gap: .9rem;
+            margin: .9rem 0;
             font-size: 1.05rem;
             cursor: pointer;
         }
 
-        input[type="checkbox"] {
-            margin-right: .6rem;
-            transform: scale(1.2);
+        .option-text {
+            display: flex;
+            flex-direction: column;
+            gap: .2rem;
+        }
+
+        .option-text strong {
+            font-weight: 600;
+        }
+
+        .option-text small {
+            color: #b0b0b0;
+            font-size: .9rem;
+            line-height: 1.4;
+        }
+
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 46px;
+            height: 26px;
+            flex-shrink: 0;
+            margin-top: .2rem;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+            position: absolute;
+        }
+
+        .slider {
+            position: absolute;
+            inset: 0;
+            background: #4a4a4a;
+            border-radius: 999px;
+            transition: background-color .2s ease, transform .2s ease;
+            cursor: pointer;
+        }
+
+        .slider::before {
+            content: "";
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            left: 3px;
+            top: 3px;
+            border-radius: 50%;
+            background: #fff;
+            transition: transform .2s ease;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+        }
+
+        .switch input:checked+.slider {
+            background: #2ecc71;
+        }
+
+        .switch input:checked+.slider::before {
+            transform: translateX(20px);
+        }
+
+        .switch input:focus-visible+.slider {
+            outline: 2px solid #fff;
+            outline-offset: 2px;
         }
 
         .install-btn {
@@ -69,6 +134,13 @@
             background: #8457da;
         }
 
+        .disclaimer {
+            margin-top: 1rem;
+            color: #ffb347;
+            font-size: .95rem;
+            line-height: 1.45;
+        }
+
         .url {
             margin-top: 1.5rem;
             color: #999;
@@ -81,17 +153,59 @@
 <body>
 
     <div class="container">
-        <h1>Install Streamio Addon</h1>
-
+        <h1>Install Streamio Fsonline Addon</h1>
+        <p>This addon scrappes the fsonline website for movies, series and subtitles, and extracts and caches the movies
+            for a faster and more reliable player</p>
         <p>
             Choose the features you want to enable before installing.
         </p>
 
         <div class="options">
-            <label><input type="checkbox" checked value="1"> Show local player</label>
-            <label><input type="checkbox" value="2"> Show players</label>
-            <label><input type="checkbox" value="4"> Show FSOnline players in browser</label>
-            <label><input type="checkbox" value="8"> Show FSOnline website</label>
+            <div class="disclaimer">
+                To change these options later, you need to uninstall the addon and install it again.
+            </div>
+
+            <label class="option">
+                <span class="switch">
+                    <input type="checkbox" checked value="1">
+                    <span class="slider"></span>
+                </span>
+                <span class="option-text">
+                    <strong>Show cached movies</strong>
+                    <small><b>Highly recommended!</b><br /> The movies don't come from fsonline directly. They come
+                        trough this server in order to cache, responde faster and fix some fsonline errors</small>
+                </span>
+            </label>
+            <label class="option">
+                <span class="switch">
+                    <input type="checkbox" value="2">
+                    <span class="slider"></span>
+                </span>
+                <span class="option-text">
+                    <strong>Show fsonline players</strong>
+                    <small>Expose the available fsonline players directly from the website.</small>
+                </span>
+            </label>
+            <label class="option">
+                <span class="switch">
+                    <input type="checkbox" value="4">
+                    <span class="slider"></span>
+                </span>
+                <span class="option-text">
+                    <strong>Show FSOnline players in browser</strong>
+                    <small>Open FSOnline playback options directly in the browser interface.</small>
+                </span>
+            </label>
+            <label class="option">
+                <span class="switch">
+                    <input type="checkbox" value="8">
+                    <span class="slider"></span>
+                </span>
+                <span class="option-text">
+                    <strong>Show FSOnline website</strong>
+                    <small>Include the original FSOnline website from where the movie is taken.</small>
+                </span>
+            </label>
         </div>
 
         <br>
