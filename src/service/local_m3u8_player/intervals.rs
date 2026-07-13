@@ -29,7 +29,7 @@ impl Item {
         if !forbidden.contains(&mid) {
             return mid;
         }
-        for dir in 1..(len + 1) / 2 {
+        for dir in 1..len.div_ceil(2) {
             if let Some(index) = mid.checked_sub(dir)
                 && self.segments.contains(&index)
                 && !forbidden.contains(&index)
@@ -155,7 +155,7 @@ impl<'a> IntervalItem<'a> {
         };
 
         let second_item = Item {
-            segment_start_time: segment_start_time,
+            segment_start_time,
             segment_end_time: element.segment_end_time,
             segments: self.segment_index + 1..element.segments.end,
         };

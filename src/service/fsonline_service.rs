@@ -202,7 +202,7 @@ impl SubtitleFsonline {
 
 impl SubtitleFsonline {
     pub fn new(url: Arc<str>) -> Option<Self> {
-        static CORELATIONS: &[(&'static str, &'static str, Option<Language>)] = &[
+        static CORELATIONS: &[(&str, &str, Option<Language>)] = &[
             ("romanian.vtt", "ron", Some(Language::Romania)),
             ("english.vtt", "eng", Some(Language::English)),
             ("finnish.vtt", "fin", None),
@@ -231,7 +231,7 @@ impl SubtitleFsonline {
         let name = last.to_lowercase();
         for (corelation, _, lang) in CORELATIONS {
             if name.ends_with(corelation) {
-                return lang.clone().map(|lang| Self { url, lang });
+                return lang.map(|lang| Self { url, lang });
             }
         }
 

@@ -43,7 +43,7 @@ pub struct Subtitle {
 }
 
 impl Subtitle {
-    pub fn subtitle(
+    pub fn new(
         uses_https: bool,
         host: &str,
         fsonline_subtitle: &SubtitleFsonline,

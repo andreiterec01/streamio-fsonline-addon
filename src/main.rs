@@ -104,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
         cache_size_memory_mb: 200,
         bigger_time_between_segments: args.max_segment_duration,
         smaller_time_between_segments: args.target_segment_duration,
-        timeout_fast_time: Duration::from_secs(5),
+        timeout_fast_time: Duration::from_secs(args.timeout_waiting_for_playlist_sec),
     };
 
     let time_cache = local_m3u8_player::time_cache::TimeCache::new(time_cache_options).await?;

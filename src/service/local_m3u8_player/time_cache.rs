@@ -13,7 +13,7 @@ use crate::{
     ts_parser,
 };
 
-const DEFAULT_BTREE_MAP: &'static BTreeMap<usize, f32> = &BTreeMap::new();
+const DEFAULT_BTREE_MAP: &BTreeMap<usize, f32> = &BTreeMap::new();
 
 #[derive(thiserror::Error, Debug)]
 enum GetSegmentTimeError {
@@ -56,7 +56,7 @@ impl TimeCache {
         }: TimeCacheOptions<'_>,
     ) -> anyhow::Result<Self> {
         assert!(
-            smaller_time_between_segments < bigger_time_between_segments,
+            smaller_time_between_segments <= bigger_time_between_segments,
             "Invalid arguments"
         );
 
@@ -322,7 +322,6 @@ impl TimeCache {
                     }
                 }
             };
-            tracing::warn!("Inserting into cache the value {value:?}");
             self.segments_time_cache.insert(m3u8.clone(), value);
         }
         Ok(one_segment_times)

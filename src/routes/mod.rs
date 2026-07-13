@@ -102,8 +102,7 @@ impl Stream {
             external_url: None,
             subtitles: subtitles
                 .into_iter()
-                .map(|s| Subtitle::subtitle(uses_https, host, s, imdb))
-                .into_iter()
+                .map(|s| Subtitle::new(uses_https, host, s, imdb))
                 .collect(),
         }
     }
@@ -128,8 +127,7 @@ impl Stream {
             external_url: None,
             subtitles: subtitles
                 .into_iter()
-                .map(|s| Subtitle::subtitle(uses_https, host, s, imdb))
-                .into_iter()
+                .map(|s| Subtitle::new(uses_https, host, s, imdb))
                 .collect(),
         }
     }
@@ -148,7 +146,7 @@ impl Stream {
     fn fsonline_url(external_url: Arc<str>) -> Stream {
         Stream {
             name: "FSonline browser",
-            title: format!("The fsonline webpage").into(),
+            title: "The fsonline webpage".into(),
             url: None,
             behavior_hints: None,
             external_url: Some(external_url),
@@ -197,9 +195,7 @@ async fn series_function(
 
     let local_players = if options.contains(OptionsBytes::LOCAL_PLAYER) {
         Some(r.players.iter().flat_map(|r| {
-            if r.data.video.is_none() {
-                return None;
-            }
+            r.data.video.as_ref()?;
             Some(Stream::local_player_url(
                 r.server_name.clone(),
                 r.data.subtitles.iter(),
@@ -303,7 +299,7 @@ async fn subtitles(
             r.data
                 .subtitles
                 .iter()
-                .map(|s| Subtitle::subtitle(uses_https, &host, s, imdb_id))
+                .map(|s| Subtitle::new(uses_https, &host, s, imdb_id))
         })
         .collect();
     Ok(Json(SubtitlesList { subtitles }))

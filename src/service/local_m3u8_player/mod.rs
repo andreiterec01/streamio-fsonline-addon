@@ -521,7 +521,7 @@ pub struct SegmentsTime {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(self) struct OneSegmentTime {
+struct OneSegmentTime {
     pub(self) segment_index: usize,
     pub(self) start_time: f32,
 }
