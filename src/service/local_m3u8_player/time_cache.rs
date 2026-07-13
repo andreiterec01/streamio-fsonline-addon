@@ -223,9 +223,9 @@ impl TimeCache {
             tracing::warn!("Received packet for {id:?}, but we failed to parse it");
             return;
         };
+        let r = old.insert(id.segment_index, time).is_none();
         debug_assert!(
-            old.insert(id.segment_index, time).is_none(),
-            "The value should not be already there because we checked"
+            r, "The value should not be already there because we checked"
         );
         self.segments_time_cache.insert(id.m3u8.clone(), old);
     }
