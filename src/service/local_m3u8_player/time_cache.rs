@@ -107,7 +107,7 @@ impl TimeCache {
         }
 
         let mut content_length = None;
-        for _ in 0..5 {
+        for _ in 0..10 {
             let mut f = async |range: std::ops::Range<usize>| {
                 let mut parser = ts_parser::TsStartTimeParser::new();
                 let start = range.start * Packet::SIZE;
@@ -165,8 +165,7 @@ impl TimeCache {
                     return Ok(duration);
                 }
                 Ok(None) => {
-                    // TODO: test if 15 is ok
-                    let duration = f(3..15).await.map_err(anyhow::Error::from)?;
+                    let duration = f(3..20).await.map_err(anyhow::Error::from)?;
                     if let Some(time) = duration {
                         tracing::error!("Got it in the 3..10 segments!!!");
                         return Ok(time);
