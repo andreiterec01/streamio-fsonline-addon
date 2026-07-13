@@ -205,6 +205,8 @@ impl SubtitleFsonline {
         static CORELATIONS: &[(&str, &str, Option<Language>)] = &[
             ("romanian.vtt", "ron", Some(Language::Romania)),
             ("english.vtt", "eng", Some(Language::English)),
+            ("russian.vtt", "rus", None),
+            ("bulgarian.vtt", "bul", None),
             ("finnish.vtt", "fin", None),
             ("swedish.vtt", "swe", None),
             ("norwegian.vtt", "nno", None),

@@ -19,7 +19,7 @@ use crate::{
         fsonline_service::VideoServer,
         imdb_service::ImdbService,
         local_m3u8_player::{self, LocalPlayer, LocalPlayerConfig},
-        scrappers::{PlayerScrappers, vidmoly::VidmolyScrapper},
+        scrappers::{PlayerScrappers, file_sun::FileSuN, vidmoly::VidmolyScrapper},
     },
 };
 
@@ -79,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut scrappers = PlayerScrappers::new(browser);
     scrappers.add_scrapper(VidmolyScrapper::new(client.clone()));
+    scrappers.add_scrapper(FileSuN::new(client.clone()));
     let video_service = VideoServer::new(client.clone(), scrappers).await?;
     let imdb_server = ImdbService::new(client.clone());
     let imdb_to_video_server = ImdbToVideoServer::new(video_service.clone(), imdb_server);

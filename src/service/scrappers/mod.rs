@@ -2,6 +2,7 @@ use std::{collections::HashMap, ops::Deref};
 
 use crate::{contracts::PlayerOption, service::fsonline_service::VideoAndSubtitles};
 pub mod browser_discovery_scrapper;
+pub mod file_sun;
 pub mod vidmoly;
 pub struct PlayerScrappers {
     default_scrapper: PlayerScrapperBox,
