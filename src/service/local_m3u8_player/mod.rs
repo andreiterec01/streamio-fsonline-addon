@@ -6,16 +6,13 @@ use foyer::{
     BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder,
     HybridCachePolicy, HybridCacheProperties, Location, RecoverMode,
 };
-use futures::TryStreamExt;
-use mpeg2ts_reader::packet::Packet;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 mod intervals;
-mod time_cache;
+pub(crate) mod time_cache;
 use crate::{
     contracts::Imdb,
-    service::{ImdbToVideoServer, local_m3u8_player::intervals::Interval},
-    ts_parser,
+    service::{ImdbToVideoServer, local_m3u8_player::time_cache::TimeCache},
 };
 
 #[derive(Clone)]
@@ -81,14 +78,11 @@ pub struct LocalPlayer {
     client: reqwest::Client,
     m3u8_master_files: moka::future::Cache<M3U8CacheKey, Arc<M3U8Data>>,
     segments_data: HybridCache<SegmentId, hyper::body::Bytes>,
-    segments_time_cache: HybridCache<SegmentId, f32>,
     parallelism_count: usize,
     send_to_cache: tokio::sync::mpsc::UnboundedSender<LoadCacheRequest>,
     imdb_to_video_service: ImdbToVideoServer,
 
-    max_segment_duration: f32,
-    timeout_waiting_for_playlist: Duration,
-    max_segment_duration_after_timeout: f32,
+    time_cache: time_cache::TimeCache,
 }
 
 impl Clone for LocalPlayer {
@@ -97,13 +91,10 @@ impl Clone for LocalPlayer {
             client: self.client.clone(),
             m3u8_master_files: self.m3u8_master_files.clone(),
             segments_data: self.segments_data.clone(),
-            segments_time_cache: self.segments_time_cache.clone(),
             parallelism_count: self.parallelism_count,
             send_to_cache: self.send_to_cache.clone(),
             imdb_to_video_service: self.imdb_to_video_service.clone(),
-            max_segment_duration: self.max_segment_duration,
-            max_segment_duration_after_timeout: self.max_segment_duration_after_timeout,
-            timeout_waiting_for_playlist: self.timeout_waiting_for_playlist,
+            time_cache: self.time_cache.clone(),
         }
     }
 }
@@ -276,40 +267,12 @@ pub struct LocalPlayerConfig<'a> {
     pub cache_next_segments: usize,
     pub imdb_to_video_service: ImdbToVideoServer,
 
-    pub max_segment_duration: f32,
-    pub timeout_waiting_for_playlist: Duration,
-    pub max_segment_duration_after_timeout: f32,
     pub block_size_segments_mb: usize,
-}
-
-struct MyEventListener {
-    segments_time_cache: HybridCache<SegmentId, f32>,
-}
-
-impl foyer::EventListener for MyEventListener {
-    type Key = SegmentId;
-    type Value = hyper::body::Bytes;
-    fn on_leave(&self, reason: foyer::Event, key: &Self::Key, value: &Self::Value)
-    where
-        Self::Key: foyer::Key,
-        Self::Value: foyer::Value,
-    {
-        match reason {
-            foyer::Event::Clear | foyer::Event::Evict => {}
-            foyer::Event::Remove | foyer::Event::Replace => {
-                return;
-            }
-        }
-        let mut parser = ts_parser::TsStartTimeParser::new();
-        let Some(time) = parser.parse_packets(value.clone()) else {
-            return;
-        };
-        self.segments_time_cache.insert(key.clone(), time);
-    }
 }
 
 impl LocalPlayer {
     pub async fn new(
+        time_cache: TimeCache,
         LocalPlayerConfig {
             client,
             cache_ttl,
@@ -320,9 +283,6 @@ impl LocalPlayer {
             parallelism_count,
             imdb_to_video_service,
             cache_next_segments,
-            max_segment_duration,
-            max_segment_duration_after_timeout,
-            timeout_waiting_for_playlist,
             block_size_segments_mb,
         }: LocalPlayerConfig<'_>,
     ) -> anyhow::Result<Self> {
@@ -342,22 +302,6 @@ impl LocalPlayer {
                 BlockEngineConfig::new(device.clone())
                     .with_block_size(block_size_segments_mb * 1024 * 1024),
             )
-            .build()
-            .await?;
-
-        let device2 = FsDeviceBuilder::new("./cache-timestamps")
-            .with_capacity(1024 * 1024 * 512)
-            .build()?;
-
-        let segments_time_cache: HybridCache<SegmentId, f32> = HybridCacheBuilder::new()
-            .with_policy(HybridCachePolicy::WriteOnEviction)
-            .memory(memory_segments_cache_size)
-            .with_weighter(|key: &SegmentId, value: &f32| key.size() + size_of_val(value))
-            .storage()
-            .with_recover_mode(RecoverMode::Quiet)
-            .with_compression(foyer::Compression::Lz4)
-            // use block-based disk cache engine with default configuration
-            .with_engine_config(BlockEngineConfig::new(device2))
             .build()
             .await?;
 
@@ -384,14 +328,11 @@ impl LocalPlayer {
                 .weigher(weigher)
                 .time_to_live(cache_ttl)
                 .build(),
-            segments_time_cache,
             segments_data,
             parallelism_count,
             send_to_cache: tx,
             imdb_to_video_service,
-            max_segment_duration,
-            max_segment_duration_after_timeout,
-            timeout_waiting_for_playlist,
+            time_cache,
         })
     }
 
@@ -472,236 +413,22 @@ impl LocalPlayer {
     ) -> anyhow::Result<Vec<SegmentsTime>> {
         let m3u8 = self.get_m3u8(m3u8_key).await?;
 
-        let playlist = &m3u8.playlist;
         let movie_duration: f32 = m3u8.playlist.segments.iter().map(|s| s.duration).sum();
         let segments_len = m3u8.playlist.segments.len();
-        let mut one_segment_times = Vec::new();
         _ = self
-            .get_segment(SegmentId {
-                m3u8: m3u8_key.clone(),
-                segment_index: 0,
-            })
+            .get_segment(
+                SegmentId {
+                    m3u8: m3u8_key.clone(),
+                    segment_index: 0,
+                },
+                false,
+            )
             .await?;
 
-        for index in 0..playlist.segments.len() {
-            let id = SegmentId {
-                m3u8: m3u8_key.clone(),
-                segment_index: index,
-            };
-            #[derive(thiserror::Error, Debug)]
-            #[error("The cache value was not present")]
-            struct Empty;
-
-            let time = self
-                .segments_time_cache
-                .get_or_fetch(&id.clone(), move || {
-                    let segments_data = self.segments_data.clone();
-                    async move {
-                        let Some(r) = segments_data.get(&id).await.ok().flatten() else {
-                            return Err(Empty);
-                        };
-
-                        let mut parser = ts_parser::TsStartTimeParser::new();
-                        match parser.parse_packets(r.value().clone()) {
-                            Some(timestamp) => Ok(timestamp),
-                            None => {
-                                tracing::error!("The timestamp was not found in the full segment");
-                                return Err(Empty);
-                            }
-                        }
-                    }
-                })
-                .await
-                .map(|v| *v)
-                .ok();
-            if let Some(time) = time {
-                one_segment_times.push(OneSegmentTime {
-                    start_time: time,
-                    segment_index: index,
-                });
-            }
-        }
-
-        let mut intervals = Interval::new(
-            playlist.segments.len(),
-            movie_duration,
-            one_segment_times.iter().cloned(),
-        );
-
-        let mut max_segment_duration = self.max_segment_duration;
-        let deadline_on = if with_timeout {
-            Some(std::time::Instant::now() + self.timeout_waiting_for_playlist)
-        } else {
-            None
-        };
-        let mut interval_changed = false;
-        while let Some(next_interval) = intervals.next_best_to_split() {
-            if !interval_changed && let Some(deadline) = deadline_on {
-                if deadline < std::time::Instant::now() {
-                    interval_changed = true;
-                    max_segment_duration = self.max_segment_duration_after_timeout;
-                }
-            }
-            if next_interval.item().duration() < max_segment_duration {
-                break;
-            }
-
-            let index = next_interval.index();
-            let segment = &playlist.segments[index];
-            let id = SegmentId {
-                m3u8: m3u8_key.clone(),
-                segment_index: index,
-            };
-
-            // TODO: this is huge. Separate it
-            let r = self
-                .segments_time_cache
-                .get_or_fetch(&id.clone(), move || {
-                    let segments_data = self.segments_data.clone();
-                    let client = self.client.clone();
-                    let segment_uri = segment.uri.clone();
-                    async move {
-                        let r = segments_data.get(&id).await.map_err(anyhow::Error::from)?;
-                        match r {
-                            Some(v) => {
-                                let mut parser = ts_parser::TsStartTimeParser::new();
-                                match parser.parse_packets(v.value().clone()) {
-                                    Some(timestamp) => Ok(timestamp),
-                                    None => {
-                                        anyhow::bail!(
-                                            "The timestamp was not found"
-                                        );
-                                    }
-                                }
-                            }
-                            None => {
-                                let segment_seconds = async {
-                                    #[derive(thiserror::Error, Debug)]
-                                    enum RetryOrStop {
-                                        #[error(transparent)]
-                                        Retry(#[from] anyhow::Error),
-                                        #[error("The function should be stopped")]
-                                        Stop,
-                                    }
-
-                                    let mut content_length = None;
-                                    for _ in 0..5 {
-                                        let mut f = async |range: std::ops::Range<usize>| {
-                                            let mut parser = ts_parser::TsStartTimeParser::new();
-                                            let start = range.start * Packet::SIZE;
-                                            let mut end = Some(range.end * Packet::SIZE);
-                                            if let Some(content_length) = content_length {
-                                                if start >= content_length {
-                                                    return Err(RetryOrStop::Stop);
-                                                }
-                                                if end.unwrap() >= content_length {
-                                                    end = None
-                                                }
-                                            }
-                                            let range = match end {
-                                                Some(end) => {
-                                                    format!("bytes={}-{}", start, end)
-                                                }
-                                                None => {
-                                                    format!("bytes={}-", start)
-                                                }
-                                            };
-                                            let response = client
-                                                .get(&segment_uri)
-                                                .header(reqwest::header::RANGE, range)
-                                                .send()
-                                                .await
-                                                .map_err(anyhow::Error::from)?
-                                                .error_for_status()
-                                                .map_err(anyhow::Error::from)?;
-                                            if content_length.is_none() {
-                                                let value = response
-                                                    .headers()
-                                                    .get(reqwest::header::CONTENT_RANGE)
-                                                    .and_then(|v| {
-                                                        let value = v.to_str().ok()?;
-                                                        let (_, length) = value.split_once("/")?;
-
-                                                        length.parse::<usize>().ok()
-                                                    });
-                                                content_length = value;
-                                            }
-                                            let mut bytes_stream = response.bytes_stream();
-                                            let mut duration = None;
-                                            while let Some(bytes) = bytes_stream
-                                                .try_next()
-                                                .await
-                                                .map_err(anyhow::Error::from)?
-                                            {
-                                                if let Some(seconds) = parser.parse_packets(bytes) {
-                                                    duration = Some(seconds);
-                                                    break;
-                                                }
-                                            }
-                                            Ok(duration)
-                                        };
-                                        match f(0..3).await {
-                                            Ok(Some(duration)) => {
-                                                return Ok(duration);
-                                            }
-                                            Ok(None) => {
-                                                let duration = f(3..20).await?;
-                                                if let Some(time) = duration {
-                                                    tracing::error!(
-                                                        "Got it in the 3..10 segments!!!"
-                                                    );
-                                                    return Ok(time);
-                                                } else {
-                                                    anyhow::bail!(
-                                                        "Can't find the time packet in segments 3..10"
-                                                    );
-                                                }
-                                            }
-
-                                            Err(RetryOrStop::Retry(e)) => {
-                                                tracing::error!("Error received: {e:?}");
-                                                if let Some(deadline) = deadline_on && !interval_changed {
-                                                    if std::time::Instant::now()+Duration::from_secs(2) < deadline {
-                                                        tokio::time::sleep(Duration::from_secs(2)).await;
-                                                    } else {
-                                                        anyhow::bail!("Deadline elapsed. We are no longer sleeping");
-                                                    }
-                                                } else {
-                                                    tokio::time::sleep(Duration::from_secs(2)).await;
-                                                }
-                                            }
-                                            Err(RetryOrStop::Stop) => {
-                                                anyhow::bail!("Nothing found");
-                                            }
-                                        }
-                                    }
-                                    anyhow::bail!("Too many retries");
-                                };
-                                let r = segment_seconds.await?;
-                                Ok(r)
-                            }
-                        }
-                    }
-                })
-                .await;
-            match r {
-                Ok(timestamp) => {
-                    let segment_time = OneSegmentTime {
-                        segment_index: index,
-                        start_time: *timestamp.value(),
-                    };
-                    one_segment_times.push(segment_time);
-                    next_interval.split(segment_time.start_time);
-                }
-                Err(e) => {
-                    if index == 0 {
-                        anyhow::bail!("Failed to get the timestamp for the first segment: {e:?}");
-                    }
-                    tracing::error!("Failed to get segment timestamp for index {index}: {e:?}");
-                    next_interval.remove();
-                }
-            }
-        }
+        let mut one_segment_times = self
+            .time_cache
+            .get_or_fetch(m3u8_key, &m3u8.playlist, with_timeout)
+            .await?;
 
         let mut segments = Vec::new();
 
@@ -734,12 +461,18 @@ impl LocalPlayer {
         .await
     }
 
-    pub async fn get_segment(&self, segment_id: SegmentId) -> anyhow::Result<Bytes> {
-        self.send_to_cache
-            .send(LoadCacheRequest {
-                segment_id: segment_id.clone(),
-            })
-            .ok();
+    pub async fn get_segment(
+        &self,
+        segment_id: SegmentId,
+        cache_next_segments: bool,
+    ) -> anyhow::Result<Bytes> {
+        if cache_next_segments {
+            self.send_to_cache
+                .send(LoadCacheRequest {
+                    segment_id: segment_id.clone(),
+                })
+                .ok();
+        }
         let r = self
             .segments_data
             .get_or_fetch(&segment_id, || {
@@ -768,11 +501,13 @@ impl LocalPlayer {
             .await?
             .deref()
             .clone();
+        // TODO: we are doing this to often. Can we do something about this? To only insert when needed
+        self.time_cache.insert(&segment_id, &r).await;
         Ok(r)
     }
 
     pub async fn close(&self) -> anyhow::Result<()> {
-        let (r1, r2) = tokio::join!(self.segments_time_cache.close(), self.segments_data.close());
+        let (r1, r2) = tokio::join!(self.time_cache.close(), self.segments_data.close());
         r1?;
         r2?;
         Ok(())

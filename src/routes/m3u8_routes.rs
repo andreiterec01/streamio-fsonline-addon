@@ -125,7 +125,7 @@ async fn m3u8_segment(
             m3u8: m3u8.clone(),
             segment_index: index,
         };
-        let content = local_player.get_segment(id).await?;
+        let content = local_player.get_segment(id, true).await?;
         segments.push(content);
     }
     let mut headers = HeaderMap::new();

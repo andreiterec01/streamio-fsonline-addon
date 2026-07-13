@@ -29,12 +29,12 @@ pub struct Args {
     #[clap(long, env, default_value_t = 16)]
     pub cache_block_size_mb: usize,
 
-    #[clap(long, env, default_value_t = 31.)]
+    #[clap(long, env, default_value_t = 300.)]
     pub max_segment_duration: f32,
 
     #[clap(long, env, default_value_t = 9)]
     pub timeout_waiting_for_playlist_sec: u64,
 
-    #[clap(long, env, default_value_t = 80.)]
-    pub max_segment_duration_after_timeout: f32,
+    #[clap(long, env, default_value_t = 35.)]
+    pub target_segment_duration: f32,
 }

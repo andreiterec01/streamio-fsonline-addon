@@ -18,7 +18,7 @@ use crate::{
         ImdbToVideoServer,
         fsonline_service::VideoServer,
         imdb_service::ImdbService,
-        local_m3u8_player::{LocalPlayer, LocalPlayerConfig},
+        local_m3u8_player::{self, LocalPlayer, LocalPlayerConfig},
         scrappers::{PlayerScrappers, vidmoly::VidmolyScrapper},
     },
 };
@@ -94,11 +94,22 @@ async fn main() -> anyhow::Result<()> {
         cache_next_segments: args.cache_next_segments,
         parallelism_count: 4,
         imdb_to_video_service: imdb_to_video_server.clone(),
-        max_segment_duration: args.max_segment_duration,
-        max_segment_duration_after_timeout: args.max_segment_duration_after_timeout,
-        timeout_waiting_for_playlist: Duration::from_secs(args.timeout_waiting_for_playlist_sec),
     };
-    let local_player = LocalPlayer::new(local_player_config).await?;
+
+    let time_cache_options = local_m3u8_player::time_cache::TimeCacheOptions {
+        client: client.clone(),
+        // TODO: make this configurable
+        cache_path: std::path::Path::new("./cache-new-timestamp"),
+        cache_size_file_mb: 1024,
+        cache_size_memory_mb: 200,
+        bigger_time_between_segments: args.max_segment_duration,
+        smaller_time_between_segments: args.target_segment_duration,
+        timeout_fast_time: Duration::from_secs(5),
+    };
+
+    let time_cache = local_m3u8_player::time_cache::TimeCache::new(time_cache_options).await?;
+
+    let local_player = LocalPlayer::new(time_cache, local_player_config).await?;
     let state = AppState {
         video_service,
         imdb_to_video_server,
