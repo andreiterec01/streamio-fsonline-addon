@@ -427,7 +427,7 @@ impl LocalPlayer {
 
         let mut one_segment_times = self
             .time_cache
-            .get_or_fetch(m3u8_key, &m3u8.playlist, with_timeout)
+            .get_or_fetch(&self.segments_data, m3u8_key, &m3u8.playlist, with_timeout)
             .await?;
 
         let mut segments = Vec::new();
@@ -486,9 +486,10 @@ impl LocalPlayer {
             .segments_data
             .get_or_fetch(&segment_id, || {
                 let this = self.clone();
-                let m3u8_key = segment_id.m3u8.clone();
+                let time_cache = self.time_cache.clone();
+                let segment_id = segment_id.clone();
                 async move {
-                    let metadata = this.get_m3u8(&m3u8_key).await?;
+                    let metadata = this.get_m3u8(&segment_id.m3u8).await?;
 
                     let segment = metadata
                         .playlist
@@ -504,14 +505,16 @@ impl LocalPlayer {
                         .error_for_status()?
                         .bytes()
                         .await?;
+
+                    time_cache.insert(&segment_id, &segment_data).await;
+
                     anyhow::Ok(segment_data)
                 }
             })
             .await?
             .deref()
             .clone();
-        // TODO: we are doing this to often. Can we do something about this? To only insert when needed
-        self.time_cache.insert(&segment_id, &r).await;
+
         Ok(r)
     }
 

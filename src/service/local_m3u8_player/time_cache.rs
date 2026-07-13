@@ -1,10 +1,10 @@
-use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, convert::Infallible, path::Path, sync::Arc, time::Duration};
 
 use foyer::{
     BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder,
     HybridCachePolicy, RecoverMode,
 };
-use futures::TryStreamExt;
+use futures::{TryStreamExt, future::join_all};
 use m3u8_rs::MediaPlaylist;
 use mpeg2ts_reader::packet::Packet;
 
@@ -12,8 +12,6 @@ use crate::{
     service::local_m3u8_player::{M3U8CacheKey, OneSegmentTime, SegmentId, intervals::Interval},
     ts_parser,
 };
-
-const DEFAULT_BTREE_MAP: &BTreeMap<usize, f32> = &BTreeMap::new();
 
 #[derive(thiserror::Error, Debug)]
 enum GetSegmentTimeError {
@@ -201,22 +199,23 @@ impl TimeCache {
         let mutexes = self.mutexes.get_mutexes(id.m3u8.clone());
         let _insert = mutexes.mutex_insert.lock().await;
         let mut old = {
-            let old_cache;
-            let old = match self.segments_time_cache.get(&id.m3u8).await {
-                Ok(Some(old)) => {
-                    old_cache = old;
-                    old_cache.value()
+            let old = self.segments_time_cache.get(&id.m3u8).await;
+            let old = match old {
+                Ok(Some(old)) => old,
+                Ok(None) => {
+                    // No need to populate this cache entry now. We can do this only when is needed
+                    return;
                 }
-                Ok(None) => DEFAULT_BTREE_MAP,
                 Err(e) => {
                     tracing::error!("Failed to load the cache: {e:?}");
                     return;
                 }
             };
+
             if old.contains_key(&id.segment_index) {
                 return;
             }
-            old.clone()
+            old.value().clone()
         };
         let mut parser = ts_parser::TsStartTimeParser::new();
         let Some(time) = parser.parse_packets(content.clone()) else {
@@ -225,13 +224,15 @@ impl TimeCache {
         };
         let r = old.insert(id.segment_index, time).is_none();
         debug_assert!(
-            r, "The value should not be already there because we checked"
+            r,
+            "The value should not be already there because we checked"
         );
         self.segments_time_cache.insert(id.m3u8.clone(), old);
     }
 
     async fn get_inner(
         &self,
+        segments_data: &HybridCache<SegmentId, bytes::Bytes>,
         m3u8: &M3U8CacheKey,
         original_media_playlist: &MediaPlaylist,
         deadline_on: Option<tokio::time::Instant>,
@@ -246,11 +247,19 @@ impl TimeCache {
         let segments_len = original_media_playlist.segments.len();
 
         let mut intervals = {
-            let entry = self.segments_time_cache.get(m3u8).await?;
-            let segments = entry
-                .as_ref()
-                .map(|v| v.value())
-                .unwrap_or(DEFAULT_BTREE_MAP);
+            let segments = self
+                .segments_time_cache
+                .get_or_fetch(m3u8, || {
+                    let segment_data = segments_data.clone();
+                    let m3u8_key = m3u8.clone();
+                    let segments_len = original_media_playlist.segments.len();
+                    async move {
+                        Result::<_, Infallible>::Ok(
+                            get_all_times(&segment_data, &m3u8_key, segments_len).await,
+                        )
+                    }
+                })
+                .await?;
 
             let initial_segments =
                 segments
@@ -328,6 +337,7 @@ impl TimeCache {
 
     pub(super) async fn get_or_fetch(
         &self,
+        segments_data: &HybridCache<SegmentId, bytes::Bytes>,
         m3u8: &M3U8CacheKey,
         original_media_playlist: &MediaPlaylist,
         fast_response: bool,
@@ -341,6 +351,7 @@ impl TimeCache {
         let fast_mutex = mutexes.mutex_fast.lock().await;
         let segments = self
             .get_inner(
+                segments_data,
                 m3u8,
                 original_media_playlist,
                 None,
@@ -355,6 +366,7 @@ impl TimeCache {
             .then_some(Some(now + self.timeout_fast_time))
             .flatten();
         self.get_inner(
+            segments_data,
             m3u8,
             original_media_playlist,
             deadline_on,
@@ -366,6 +378,34 @@ impl TimeCache {
     pub(super) async fn close(&self) -> foyer::Result<()> {
         self.segments_time_cache.close().await
     }
+}
+
+async fn get_time(
+    segment_data: &HybridCache<SegmentId, bytes::Bytes>,
+    id: &SegmentId,
+) -> Option<f32> {
+    let r = segment_data.get(id).await.ok()??;
+    let time = ts_parser::TsStartTimeParser::new().parse_packets(r.value().clone())?;
+    Some(time)
+}
+
+async fn get_all_times(
+    segment_data: &HybridCache<SegmentId, bytes::Bytes>,
+    m3u8_key: &M3U8CacheKey,
+    segments: usize,
+) -> BTreeMap<usize, f32> {
+    let values = (0..segments).map(async |i| {
+        get_time(
+            segment_data,
+            &SegmentId {
+                m3u8: m3u8_key.clone(),
+                segment_index: i,
+            },
+        )
+        .await
+        .and_then(|time| Some((i, time)))
+    });
+    join_all(values).await.into_iter().flatten().collect()
 }
 
 struct RemoveOnDrop {
