@@ -432,6 +432,15 @@ impl LocalPlayer {
 
         let mut segments = Vec::new();
 
+        if !one_segment_times.iter().any(|s| s.segment_index == 0) {
+            tracing::error!(
+                "There was an error and we didn't received the first segment time. Assuming to be 0"
+            );
+            one_segment_times.push(OneSegmentTime {
+                segment_index: 0,
+                start_time: 0.,
+            });
+        }
         one_segment_times.sort_by_key(|v| v.segment_index);
 
         for i in 0..one_segment_times.len() - 1 {
