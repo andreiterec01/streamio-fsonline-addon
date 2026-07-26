@@ -93,6 +93,10 @@ impl Stream {
         imdb: Imdb,
     ) -> Stream {
         Stream {
+            subtitles: subtitles
+                .into_iter()
+                .map(|s| Subtitle::new(uses_https, host, s, imdb, &server_name))
+                .collect(),
             name: "FSonline",
             title: server_name,
             url: Some(url),
@@ -100,10 +104,6 @@ impl Stream {
                 not_web_ready: true,
             }),
             external_url: None,
-            subtitles: subtitles
-                .into_iter()
-                .map(|s| Subtitle::new(uses_https, host, s, imdb))
-                .collect(),
         }
     }
 
@@ -116,6 +116,10 @@ impl Stream {
     ) -> Stream {
         let protocol = if uses_https { "https" } else { "http" };
         Stream {
+            subtitles: subtitles
+                .into_iter()
+                .map(|s| Subtitle::new(uses_https, host, s, imdb, &server_name))
+                .collect(),
             name: "FSonline local player",
             url: Some(
                 format!("{protocol}://{host}/v1/api/{server_name}/{imdb}/playlist.m3u8").into(),
@@ -125,10 +129,6 @@ impl Stream {
                 not_web_ready: true,
             }),
             external_url: None,
-            subtitles: subtitles
-                .into_iter()
-                .map(|s| Subtitle::new(uses_https, host, s, imdb))
-                .collect(),
         }
     }
 
@@ -288,8 +288,9 @@ async fn subtitles(
     State(movie): State<ImdbToVideoServer>,
     State(UsesHttps(uses_https)): State<UsesHttps>,
     State(crate::Host(host)): State<crate::Host>,
-    Path((_, imdb_id, _)): Path<(OptionsBytes, Imdb, String)>,
+    Path((_, imdb_id, filename)): Path<(OptionsBytes, Imdb, String)>,
 ) -> WebResult<Json<SubtitlesList>> {
+    tracing::info!("Subtitle filename is {filename}");
     let r = movie.get(imdb_id).await?;
 
     let subtitles = r
@@ -299,7 +300,7 @@ async fn subtitles(
             r.data
                 .subtitles
                 .iter()
-                .map(|s| Subtitle::new(uses_https, &host, s, imdb_id))
+                .map(|s| Subtitle::new(uses_https, &host, s, imdb_id, &r.server_name))
         })
         .collect();
     Ok(Json(SubtitlesList { subtitles }))
