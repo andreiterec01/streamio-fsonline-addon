@@ -82,8 +82,24 @@ pub struct PlayerData {
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Deserialize)]
 pub struct SeriesData {
-    pub season: u32,
-    pub episode: u32,
+    pub season: u16,
+    pub episode: u16,
+}
+
+impl SeriesData {
+    pub fn as_u32(&self) -> u32 {
+        ((self.season as u32) << 16) | self.episode as u32
+    }
+
+    pub fn from_u32(value: u32) -> Option<Self> {
+        if value == 0 {
+            return None;
+        }
+        Some(Self {
+            episode: value as u16,
+            season: (value >> 16) as u16,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Deserialize)]
@@ -114,13 +130,29 @@ impl Display for MovieKey {
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct Imdb {
-    pub imdb_id: u64,
+    pub imdb_id: u32,
     pub series_data: Option<SeriesData>,
 }
 
 impl Imdb {
     pub fn is_series(&self) -> bool {
         self.series_data.is_some()
+    }
+
+    pub fn to_u64(&self) -> u64 {
+        (self.imdb_id as u64) << 32
+            | self
+                .series_data
+                .map(|v| v.as_u32() as u64)
+                .unwrap_or_default()
+    }
+
+    pub fn from_u64(imdb_encoded: u64) -> Self {
+        let series_data = SeriesData::from_u32(imdb_encoded as u32);
+        Self {
+            imdb_id: (imdb_encoded >> 32) as u32,
+            series_data,
+        }
     }
 }
 

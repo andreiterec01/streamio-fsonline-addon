@@ -20,7 +20,6 @@ use crate::{
     },
 };
 pub mod m3u8_routes;
-
 pub fn routes() -> Router<AppState> {
     use axum::routing::*;
     Router::new()

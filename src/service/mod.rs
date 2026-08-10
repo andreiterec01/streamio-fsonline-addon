@@ -13,6 +13,22 @@ pub mod imdb_service;
 pub mod local_m3u8_player;
 pub mod scrappers;
 
+pub struct PlaylistInfoMetadata {
+    pub movie_duration: f64,
+    pub total_segments: usize,
+}
+
+pub struct PlaylistInfo {
+    pub metadata: PlaylistInfoMetadata,
+    pub segments: Vec<SegmentInfo>,
+}
+
+pub struct SegmentInfo {
+    pub segment_index: usize,
+    pub size: u64,
+    pub start_time: Option<f64>,
+}
+
 #[derive(Clone)]
 pub struct ImdbToVideoServer {
     video_service: VideoServer,

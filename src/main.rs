@@ -31,6 +31,7 @@ mod mw;
 mod routes;
 mod service;
 mod ts_parser;
+mod utils;
 #[derive(Clone)]
 pub struct UsesHttps(pub bool);
 
@@ -50,7 +51,7 @@ pub struct AppState {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // all imdb keys at: https://datasets.imdbws.com/title.basics.tsv.gz
-    dotenvy::dotenv().ok();
+    dotenvy::dotenv().unwrap();
     let args = args::Args::parse();
     let filter = EnvFilter::from_default_env();
     let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stderr());

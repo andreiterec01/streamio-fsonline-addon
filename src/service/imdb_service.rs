@@ -8,7 +8,7 @@ use crate::service::fsonline_service::MovieData;
 #[derive(Clone)]
 pub struct ImdbService {
     client: reqwest::Client,
-    imbp_to_movie_name_cache: moka::future::Cache<u64, MovieData>,
+    imbp_to_movie_name_cache: moka::future::Cache<u32, MovieData>,
 }
 
 impl ImdbService {
@@ -19,7 +19,7 @@ impl ImdbService {
         }
     }
 
-    pub async fn get(&self, imdb_id: u64, is_series: bool) -> anyhow::Result<MovieData> {
+    pub async fn get(&self, imdb_id: u32, is_series: bool) -> anyhow::Result<MovieData> {
         #[derive(serde::Deserialize)]
         struct Root {
             meta: MetaResponse,

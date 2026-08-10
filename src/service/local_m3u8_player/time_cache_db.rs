@@ -4,12 +4,14 @@ use foyer::{
     BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder,
     HybridCachePolicy, RecoverMode,
 };
-use futures::{TryStreamExt, future::join_all};
+use futures::{StreamExt, TryStreamExt, future::join_all};
 use m3u8_rs::MediaPlaylist;
 use mpeg2ts_reader::packet::Packet;
 
 use crate::{
-    service::local_m3u8_player::{M3U8CacheKey, OneSegmentTime, SegmentId, intervals::Interval},
+    service::local_m3u8_player::{
+        M3U8CacheKey, OneSegmentTime, SegmentId, intervals::Interval, segments_database::Database,
+    },
     ts_parser,
     utils::MultipleValueMutex,
 };
@@ -34,15 +36,13 @@ pub struct TimeCacheOptions<'a> {
 
 #[derive(Clone)]
 pub struct TimeCache {
-    segments_time_cache: HybridCache<M3U8CacheKey, BTreeMap<usize, f32>>,
+    segments_time_cache_moka: moka::future::Cache<M3U8CacheKey, BTreeMap<usize, f32>>,
     mutexes_slow: MultipleValueMutex<M3U8CacheKey>,
-    mutexes_fast: MultipleValueMutex<M3U8CacheKey>,
-    // TODO: this maybe we should remove
-    mutexes_insert: MultipleValueMutex<M3U8CacheKey>,
     smaller_time_between_segments: f32,
     bigger_time_between_segments: f32,
     timeout_fast_time: Duration,
     client: reqwest::Client,
+    db: Database,
 }
 
 impl TimeCache {
@@ -82,15 +82,25 @@ impl TimeCache {
                 .with_engine_config(BlockEngineConfig::new(device))
                 .build()
                 .await?;
+
+        let segments_time_cache_moka = moka::future::CacheBuilder::<
+            M3U8CacheKey,
+            BTreeMap<usize, f32>,
+            _,
+        >::new(1024 * 1024 * cache_size_memory_mb as u64)
+        .weigher(|key, v| {
+            (key.size() + size_of_val(v) + v.len() * (size_of::<usize>() + size_of::<f32>())) as u32
+        })
+        .build();
+
         Ok(Self {
-            segments_time_cache,
-            mutexes_fast: MultipleValueMutex::new(),
             mutexes_slow: MultipleValueMutex::new(),
-            mutexes_insert: MultipleValueMutex::new(),
             smaller_time_between_segments,
             bigger_time_between_segments,
             timeout_fast_time,
             client,
+            segments_time_cache_moka,
+            db: todo!(),
         })
     }
 
@@ -202,26 +212,29 @@ impl TimeCache {
     }
 
     pub(super) async fn insert(&self, id: &SegmentId, content: &bytes::Bytes) {
-        let _insert = self.mutexes_insert.lock_mutex(id.m3u8.clone()).await;
-        let mut old = {
-            let old = self.segments_time_cache.get(&id.m3u8).await;
-            let old = match old {
-                Ok(Some(old)) => old,
-                Ok(None) => {
-                    // No need to populate this cache entry now. We can do this only when is needed
-                    return;
-                }
-                Err(e) => {
-                    tracing::error!("Failed to load the cache: {e:?}");
-                    return;
-                }
-            };
+        // let mut old = {
+        //     let old = self.segments_time_cache.get(&id.m3u8).await;
+        //     let old = match old {
+        //         Ok(Some(old)) => old,
+        //         Ok(None) => {
+        //             // No need to populate this cache entry now. We can do this only when is needed
+        //             return;
+        //         }
+        //         Err(e) => {
+        //             tracing::error!("Failed to load the cache: {e:?}");
+        //             return;
+        //         }
+        //     };
 
-            if old.contains_key(&id.segment_index) {
-                return;
-            }
-            old.value().clone()
-        };
+        //     if old.contains_key(&id.segment_index) {
+        //         return;
+        //     }
+        //     old.value().clone()
+        // };
+        self.segments_time_cache_moka
+            .entry_by_ref(&id.m3u8)
+            .and_compute_with(|entry| {})
+            .await;
         let mut parser = ts_parser::TsStartTimeParser::new();
         let Some(time) = parser.parse_packets(content.clone()) else {
             tracing::warn!("Received packet for {id:?}, but we failed to parse it");
@@ -252,18 +265,10 @@ impl TimeCache {
         let segments_len = original_media_playlist.segments.len();
 
         let mut intervals = {
+            self.segments_time_cache_moka.run_pending_tasks().await;
             let segments = self
-                .segments_time_cache
-                .get_or_fetch(m3u8, || {
-                    let segment_data = segments_data.clone();
-                    let m3u8_key = m3u8.clone();
-                    let segments_len = original_media_playlist.segments.len();
-                    async move {
-                        Result::<_, Infallible>::Ok(
-                            get_all_times(&segment_data, &m3u8_key, segments_len).await,
-                        )
-                    }
-                })
+                .segments_time_cache_moka
+                .try_get_with_by_ref(m3u8, async { get_all_times_new(&self.db, &m3u8).await })
                 .await?;
 
             let initial_segments =
@@ -409,4 +414,20 @@ async fn get_all_times(
         .and_then(|time| Some((i, time)))
     });
     join_all(values).await.into_iter().flatten().collect()
+}
+
+async fn get_all_times_new(
+    db: &Database,
+    m3u8_key: &M3U8CacheKey,
+) -> anyhow::Result<BTreeMap<usize, f32>> {
+    let r = db
+        .get_segments_info(m3u8_key.imdb, &m3u8_key.server_name)
+        .try_filter_map(|row| {
+            std::future::ready(Ok(row
+                .start_time
+                .map(|start_time| (row.segment_index, start_time as f32))))
+        })
+        .try_collect()
+        .await?;
+    Ok(r)
 }

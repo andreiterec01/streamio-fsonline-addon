@@ -9,7 +9,9 @@ use foyer::{
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 mod intervals;
+pub mod segments_database;
 pub(crate) mod time_cache;
+pub(crate) mod time_cache_db;
 use crate::{
     contracts::Imdb,
     service::{ImdbToVideoServer, local_m3u8_player::time_cache::TimeCache},

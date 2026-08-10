@@ -28,10 +28,11 @@ regex = "1.12.4"
 reqwest = { version = "0.13.4", features = ["form", "gzip", "json", "stream"] }
 scraper = "0.27.0"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
+sqlx = { version = "0.9.0", features = ["sqlite"] }
 thiserror = "2.0.18"
 time = { version = "0.3.49", features = ["macros"] }
 tokio = { version = "1.52.3", features = ["full"] }
-tokio-util = "0.7.18"
+tokio-util = { version = "0.7.18", features = ["codec"] }
 tower = "0.5.3"
 tower-http = { version = "0.7", features = ["cors", "fs"] }
 tracing = "0.1.44"
