@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
     let imdb_to_video_server = ImdbToVideoServer::new(video_service.clone(), imdb_server);
     let local_player_config = LocalPlayerConfig {
         // TODO: make this configurable
-        cache_ttl: Duration::from_secs(3600 * 4),
+        cache_ttl: Duration::from_secs(3600 * 2),
         block_size_segments_mb: args.cache_block_size_mb,
         client: client.clone(),
         directory_cache: &args.cache_path,

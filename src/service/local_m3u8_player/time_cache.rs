@@ -7,6 +7,7 @@ use foyer::{
 use futures::{TryStreamExt, future::join_all};
 use m3u8_rs::MediaPlaylist;
 use mpeg2ts_reader::packet::Packet;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     service::local_m3u8_player::{M3U8CacheKey, OneSegmentTime, SegmentId, intervals::Interval},
@@ -31,9 +32,16 @@ pub struct TimeCacheOptions<'a> {
     pub(crate) client: reqwest::Client,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct SegmentTimeCacheValue {
+    segments_time: BTreeMap<usize, f32>,
+    movie_duration: f32,
+    total_segments_count: usize,
+}
+
 #[derive(Clone)]
 pub struct TimeCache {
-    segments_time_cache: HybridCache<M3U8CacheKey, BTreeMap<usize, f32>>,
+    segments_time_cache: HybridCache<M3U8CacheKey, SegmentTimeCacheValue>,
     mutexes: MultipleValueMutex,
     smaller_time_between_segments: f32,
     bigger_time_between_segments: f32,
@@ -62,14 +70,18 @@ impl TimeCache {
             .with_capacity(1024 * 1024 * cache_size_file_mb)
             .build()?;
 
-        let segments_time_cache: HybridCache<M3U8CacheKey, BTreeMap<usize, f32>> =
+        let segments_time_cache: HybridCache<M3U8CacheKey, SegmentTimeCacheValue> =
             HybridCacheBuilder::new()
                 .with_policy(HybridCachePolicy::WriteOnEviction)
                 // .memory(memory_segments_cache_size)
                 .memory(1024 * 1024 * cache_size_memory_mb)
-                .with_filter(|_: &M3U8CacheKey, v: &BTreeMap<usize, f32>| !v.is_empty())
-                .with_weighter(|key: &M3U8CacheKey, v: &BTreeMap<usize, f32>| {
-                    key.size() + size_of_val(v) + v.len() * (size_of::<usize>() + size_of::<f32>())
+                .with_filter(|_: &M3U8CacheKey, v: &SegmentTimeCacheValue| {
+                    !v.segments_time.is_empty()
+                })
+                .with_weighter(|key: &M3U8CacheKey, v: &SegmentTimeCacheValue| {
+                    key.size()
+                        + size_of_val(v)
+                        + v.segments_time.len() * (size_of::<usize>() + size_of::<f32>())
                 })
                 .storage()
                 .with_recover_mode(RecoverMode::Quiet)
@@ -212,7 +224,7 @@ impl TimeCache {
                 }
             };
 
-            if old.contains_key(&id.segment_index) {
+            if old.segments_time.contains_key(&id.segment_index) {
                 return;
             }
             old.value().clone()
@@ -222,7 +234,7 @@ impl TimeCache {
             tracing::warn!("Received packet for {id:?}, but we failed to parse it");
             return;
         };
-        let r = old.insert(id.segment_index, time).is_none();
+        let r = old.segments_time.insert(id.segment_index, time).is_none();
         debug_assert!(
             r,
             "The value should not be already there because we checked"
@@ -252,28 +264,46 @@ impl TimeCache {
                 .get_or_fetch(m3u8, || {
                     let segment_data = segments_data.clone();
                     let m3u8_key = m3u8.clone();
-                    let segments_len = original_media_playlist.segments.len();
                     async move {
                         Result::<_, Infallible>::Ok(
-                            get_all_times(&segment_data, &m3u8_key, segments_len).await,
+                            get_all_times(&segment_data, &m3u8_key, segments_len, movie_duration)
+                                .await,
                         )
                     }
                 })
                 .await?;
 
-            let initial_segments =
-                segments
-                    .iter()
-                    .map(|(segment_index, start_time)| OneSegmentTime {
-                        segment_index: *segment_index,
-                        start_time: *start_time,
+            // TODO: the movie returned changed. We need to delete the old cache
+            if (segments.movie_duration - movie_duration).abs() > 0.1
+                || segments.total_segments_count != segments_len
+            {
+                tracing::error!(
+                    "The movie {m3u8:?} changed. We will delete all the old cache values"
+                );
+                for segment_index in 0..segments.total_segments_count {
+                    segments_data.remove(&SegmentId {
+                        m3u8: m3u8.clone(),
+                        segment_index,
                     });
-            one_segment_times.extend(initial_segments);
-            Interval::new(
-                segments_len,
-                movie_duration,
-                one_segment_times.iter().cloned(),
-            )
+                }
+                self.segments_time_cache.remove(m3u8);
+                Interval::new(segments_len, movie_duration, [])
+            } else {
+                let initial_segments =
+                    segments
+                        .segments_time
+                        .iter()
+                        .map(|(segment_index, start_time)| OneSegmentTime {
+                            segment_index: *segment_index,
+                            start_time: *start_time,
+                        });
+                one_segment_times.extend(initial_segments);
+                Interval::new(
+                    segments_len,
+                    movie_duration,
+                    one_segment_times.iter().cloned(),
+                )
+            }
         };
         let mut something_changed = false;
         while let Some(next_interval) = intervals.next_best_to_split() {
@@ -318,7 +348,7 @@ impl TimeCache {
             match self.segments_time_cache.get(m3u8).await? {
                 None => {}
                 Some(old) => {
-                    for (segment_index, time) in old.iter() {
+                    for (segment_index, time) in old.segments_time.iter() {
                         let segment_index = *segment_index;
                         let start_time = *time;
                         if value.insert(segment_index, start_time).is_none() {
@@ -330,7 +360,14 @@ impl TimeCache {
                     }
                 }
             };
-            self.segments_time_cache.insert(m3u8.clone(), value);
+            self.segments_time_cache.insert(
+                m3u8.clone(),
+                SegmentTimeCacheValue {
+                    segments_time: value,
+                    movie_duration,
+                    total_segments_count: segments_len,
+                },
+            );
         }
         Ok(one_segment_times)
     }
@@ -393,7 +430,8 @@ async fn get_all_times(
     segment_data: &HybridCache<SegmentId, bytes::Bytes>,
     m3u8_key: &M3U8CacheKey,
     segments: usize,
-) -> BTreeMap<usize, f32> {
+    movie_duration: f32,
+) -> SegmentTimeCacheValue {
     let values = (0..segments).map(async |i| {
         get_time(
             segment_data,
@@ -405,7 +443,13 @@ async fn get_all_times(
         .await
         .and_then(|time| Some((i, time)))
     });
-    join_all(values).await.into_iter().flatten().collect()
+    let segments_time = join_all(values).await.into_iter().flatten().collect();
+
+    SegmentTimeCacheValue {
+        segments_time,
+        movie_duration,
+        total_segments_count: segments,
+    }
 }
 
 struct RemoveOnDrop {

@@ -45,7 +45,7 @@ impl VideoServer {
             client,
             player_scrapper: Arc::new(player_scrapper),
             cache: moka::future::CacheBuilder::new(100_000)
-                .time_to_live(Duration::from_secs(3600 * 4))
+                .time_to_live(Duration::from_secs(3600 * 2))
                 .build(),
         })
     }
