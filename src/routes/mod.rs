@@ -16,7 +16,7 @@ use crate::{
     service::{
         ImdbToVideoServer,
         fsonline_service::{SubtitleFsonline, VideoServer},
-        local_m3u8_player::{LocalPlayer, M3U8CacheKey},
+        local_m3u8_player::{M3U8CacheKey, segments_database::NewLocalPlayer},
     },
 };
 pub mod m3u8_routes;
@@ -158,7 +158,7 @@ async fn series_function(
     movie: ImdbToVideoServer,
     uses_https: bool,
     host: Arc<str>,
-    local_player_service: LocalPlayer,
+    local_player_service: Arc<NewLocalPlayer>,
     options: OptionsBytes,
     imdb_id: Imdb,
 ) -> WebResult<Json<SeriesResponse>> {
@@ -264,7 +264,7 @@ async fn series(
     State(movie): State<ImdbToVideoServer>,
     State(UsesHttps(uses_https)): State<UsesHttps>,
     State(crate::Host(host)): State<crate::Host>,
-    State(local_player_service): State<LocalPlayer>,
+    State(local_player_service): State<Arc<NewLocalPlayer>>,
     Path((options, imdb_id)): Path<(OptionsBytes, Imdb)>,
 ) -> WebResult<Json<SeriesResponse>> {
     series_function(

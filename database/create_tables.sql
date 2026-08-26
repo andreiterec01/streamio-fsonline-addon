@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS segments(
     server VARCHAR(32) NOT NULL,
     segment INTEGER NOT NULL,
     last_acces INTEGER,
-    size INTEGER NOT NULL,
+    size INTEGER,
     start_time FLOAT,
     PRIMARY KEY(imdb, server, segment)
 );

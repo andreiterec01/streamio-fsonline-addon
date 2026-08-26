@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{
     Router,
     extract::{Path, State},
@@ -12,7 +14,7 @@ use crate::{
     contracts::Imdb,
     custom_extractor::{DontLogResponse, axum_range::Ranged},
     error::WebResult,
-    service::local_m3u8_player::{LocalPlayer, M3U8CacheKey, SegmentId},
+    service::local_m3u8_player::{M3U8CacheKey, SegmentId, segments_database::NewLocalPlayer},
 };
 
 pub(super) fn routes() -> Router<AppState> {
@@ -43,7 +45,7 @@ struct SegmentRequest {
 }
 
 async fn create_new_playlist(
-    player: &LocalPlayer,
+    player: &NewLocalPlayer,
     protocol: &str,
     host: &str,
     key: &M3U8CacheKey,
@@ -82,7 +84,7 @@ async fn create_new_playlist(
 }
 
 async fn m3u8_playlist(
-    local_player: State<LocalPlayer>,
+    local_player: State<Arc<NewLocalPlayer>>,
     Path(path): Path<ServerNameAndImdb>,
     State(UsesHttps(uses_https)): State<UsesHttps>,
     State(crate::Host(host)): State<crate::Host>,
@@ -95,8 +97,7 @@ async fn m3u8_playlist(
 
     let protocol = if uses_https { "https" } else { "http" };
 
-    let playlist =
-        create_new_playlist(&local_player, protocol, &host, &key, &metadata.playlist).await?;
+    let playlist = create_new_playlist(&local_player, protocol, &host, &key, &metadata).await?;
 
     let mut result = std::io::Cursor::new(Vec::new());
     playlist.write_to(&mut result).unwrap();
@@ -109,29 +110,35 @@ async fn m3u8_playlist(
 }
 
 async fn m3u8_segment(
-    local_player: State<LocalPlayer>,
+    local_player: State<Arc<NewLocalPlayer>>,
     Path(path): Path<SegmentRequest>,
-    range: Option<TypedHeader<axum_extra::headers::Range>>,
-) -> WebResult<DontLogResponse<(HeaderMap, Ranged)>> {
-    let mut segments = Vec::new();
-    let m3u8 = M3U8CacheKey {
-        imdb: path.imdb,
-        server_name: path.server_name.into(),
-    };
+    // range: Option<TypedHeader<axum_extra::headers::Range>>,
+) -> WebResult<DontLogResponse<(HeaderMap, axum::body::Body)>> {
+    // let mut segments = Vec::new();
+    // let m3u8 = M3U8CacheKey {
+    //     imdb: path.imdb,
+    //     server_name: path.server_name.into(),
+    // };
 
-    for index in path.segment_start..path.segment_end {
-        let id = SegmentId {
-            m3u8: m3u8.clone(),
-            segment_index: index,
-        };
-        let content = local_player.get_segment(id, true).await?;
-        segments.push(content);
-    }
+    let results = local_player
+        .get_segments(
+            path.imdb,
+            path.server_name.into(),
+            path.segment_start..path.segment_end,
+        )
+        .await?;
+
+    let body = axum::body::Body::from_stream(results.stream);
+    // for index in path.segment_start..path.segment_end {
+    //     let id = SegmentId {
+    //         m3u8: m3u8.clone(),
+    //         segment_index: index,
+    //     };
+    //     let content = local_player.get_segment(id, true).await?;
+    //     segments.push(content);
+    // }
     let mut headers = HeaderMap::new();
     headers.insert(hyper::header::CONTENT_TYPE, "video/MP2T".parse().unwrap());
 
-    Ok(DontLogResponse((
-        headers,
-        Ranged::new(range.map(|TypedHeader(range)| range), segments),
-    )))
+    Ok(DontLogResponse((headers, body)))
 }

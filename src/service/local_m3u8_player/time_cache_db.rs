@@ -6,11 +6,16 @@ use foyer::{
 };
 use futures::{StreamExt, TryStreamExt, future::join_all};
 use m3u8_rs::MediaPlaylist;
+use moka::ops::compute::{CompResult, Op};
 use mpeg2ts_reader::packet::Packet;
 
 use crate::{
-    service::local_m3u8_player::{
-        M3U8CacheKey, OneSegmentTime, SegmentId, intervals::Interval, segments_database::Database,
+    service::{
+        SegmentInfo,
+        local_m3u8_player::{
+            M3U8CacheKey, OneSegmentTime, SegmentId, intervals::Interval,
+            segments_database::Database,
+        },
     },
     ts_parser,
     utils::MultipleValueMutex,
@@ -36,7 +41,9 @@ pub struct TimeCacheOptions<'a> {
 
 #[derive(Clone)]
 pub struct TimeCache {
-    segments_time_cache_moka: moka::future::Cache<M3U8CacheKey, BTreeMap<usize, f32>>,
+    // TODO: we should also save the movie duration and segments count. In case the response changes
+    // TODO: change Vec to Arc<[]>
+    segments_time_cache_moka: moka::future::Cache<M3U8CacheKey, Vec<OneSegmentTime>>,
     mutexes_slow: MultipleValueMutex<M3U8CacheKey>,
     smaller_time_between_segments: f32,
     bigger_time_between_segments: f32,
@@ -47,6 +54,7 @@ pub struct TimeCache {
 
 impl TimeCache {
     pub async fn new(
+        db: Database,
         TimeCacheOptions {
             bigger_time_between_segments,
             smaller_time_between_segments,
@@ -62,30 +70,9 @@ impl TimeCache {
             "Invalid arguments"
         );
 
-        let device = FsDeviceBuilder::new(cache_path)
-            .with_capacity(1024 * 1024 * cache_size_file_mb)
-            .build()?;
-
-        let segments_time_cache: HybridCache<M3U8CacheKey, BTreeMap<usize, f32>> =
-            HybridCacheBuilder::new()
-                .with_policy(HybridCachePolicy::WriteOnEviction)
-                // .memory(memory_segments_cache_size)
-                .memory(1024 * 1024 * cache_size_memory_mb)
-                .with_filter(|_: &M3U8CacheKey, v: &BTreeMap<usize, f32>| !v.is_empty())
-                .with_weighter(|key: &M3U8CacheKey, v: &BTreeMap<usize, f32>| {
-                    key.size() + size_of_val(v) + v.len() * (size_of::<usize>() + size_of::<f32>())
-                })
-                .storage()
-                .with_recover_mode(RecoverMode::Quiet)
-                .with_compression(foyer::Compression::Lz4)
-                // use block-based disk cache engine with default configuration
-                .with_engine_config(BlockEngineConfig::new(device))
-                .build()
-                .await?;
-
         let segments_time_cache_moka = moka::future::CacheBuilder::<
             M3U8CacheKey,
-            BTreeMap<usize, f32>,
+            Vec<OneSegmentTime>,
             _,
         >::new(1024 * 1024 * cache_size_memory_mb as u64)
         .weigher(|key, v| {
@@ -100,7 +87,7 @@ impl TimeCache {
             timeout_fast_time,
             client,
             segments_time_cache_moka,
-            db: todo!(),
+            db,
         })
     }
 
@@ -212,51 +199,47 @@ impl TimeCache {
     }
 
     pub(super) async fn insert(&self, id: &SegmentId, content: &bytes::Bytes) {
-        // let mut old = {
-        //     let old = self.segments_time_cache.get(&id.m3u8).await;
-        //     let old = match old {
-        //         Ok(Some(old)) => old,
-        //         Ok(None) => {
-        //             // No need to populate this cache entry now. We can do this only when is needed
-        //             return;
-        //         }
-        //         Err(e) => {
-        //             tracing::error!("Failed to load the cache: {e:?}");
-        //             return;
-        //         }
-        //     };
-
-        //     if old.contains_key(&id.segment_index) {
-        //         return;
-        //     }
-        //     old.value().clone()
-        // };
         self.segments_time_cache_moka
             .entry_by_ref(&id.m3u8)
-            .and_compute_with(|entry| {})
+            .and_compute_with(async |entry| {
+                let mut old = match entry {
+                    None => {
+                        return Op::Nop;
+                    }
+                    Some(entry) => entry.into_value(),
+                };
+
+                let index = match old.binary_search_by_key(&id.segment_index, |x| x.segment_index) {
+                    Ok(_) => {
+                        return Op::Nop;
+                    }
+                    Err(index) => index,
+                };
+
+                let mut parser = ts_parser::TsStartTimeParser::new();
+                let Some(time) = parser.parse_packets(content.clone()) else {
+                    tracing::warn!("Received packet for {id:?}, but we failed to parse it");
+                    return Op::Nop;
+                };
+
+                old.insert(
+                    index,
+                    OneSegmentTime {
+                        segment_index: index,
+                        start_time: time,
+                    },
+                );
+                Op::Put(old)
+            })
             .await;
-        let mut parser = ts_parser::TsStartTimeParser::new();
-        let Some(time) = parser.parse_packets(content.clone()) else {
-            tracing::warn!("Received packet for {id:?}, but we failed to parse it");
-            return;
-        };
-        let r = old.insert(id.segment_index, time).is_none();
-        debug_assert!(
-            r,
-            "The value should not be already there because we checked"
-        );
-        self.segments_time_cache.insert(id.m3u8.clone(), old);
     }
 
     async fn get_inner(
         &self,
-        segments_data: &HybridCache<SegmentId, bytes::Bytes>,
         m3u8: &M3U8CacheKey,
         original_media_playlist: &MediaPlaylist,
         deadline_on: Option<tokio::time::Instant>,
-        max_interval_between_segments: f32,
     ) -> anyhow::Result<Vec<OneSegmentTime>> {
-        let mut one_segment_times = Vec::new();
         let movie_duration: f32 = original_media_playlist
             .segments
             .iter()
@@ -264,128 +247,158 @@ impl TimeCache {
             .sum();
         let segments_len = original_media_playlist.segments.len();
 
-        let mut intervals = {
-            self.segments_time_cache_moka.run_pending_tasks().await;
-            let segments = self
-                .segments_time_cache_moka
-                .try_get_with_by_ref(m3u8, async { get_all_times_new(&self.db, &m3u8).await })
-                .await?;
+        let response = self
+            .segments_time_cache_moka
+            .try_get_with_by_ref(m3u8, async {
+                // TODO: extract into a function this inner methods
+                // TODO: we should also get the movie segments count and duration. To check them against the original media playlist
+                let mut times = get_all_times_new(&self.db, &m3u8).await?;
 
-            let initial_segments =
-                segments
-                    .iter()
-                    .map(|(segment_index, start_time)| OneSegmentTime {
-                        segment_index: *segment_index,
-                        start_time: *start_time,
-                    });
-            one_segment_times.extend(initial_segments);
-            Interval::new(
-                segments_len,
-                movie_duration,
-                one_segment_times.iter().cloned(),
-            )
-        };
-        let mut something_changed = false;
-        while let Some(next_interval) = intervals.next_best_to_split() {
-            let duration = next_interval.item().duration();
-            if duration < max_interval_between_segments {
-                break;
-            }
+                let mut intervals =
+                    Interval::new(segments_len, movie_duration, times.iter().cloned());
 
-            let index = next_interval.index();
+                let mut something_changed = false;
+                while let Some(next_interval) = intervals.next_best_to_split() {
+                    let duration = next_interval.item().duration();
+                    if duration < self.bigger_time_between_segments {
+                        tracing::info!("Duration is {}. Stopping", duration);
+                        break;
+                    }
 
-            let r = self
-                .get_segment_time(&original_media_playlist.segments[index].uri, deadline_on)
-                .await;
+                    let index = next_interval.index();
+                    // TODO: remove this log
+                    tracing::info!("Received new index {index}");
 
-            match r {
-                Ok(start_time) => {
-                    let segment_time = OneSegmentTime {
-                        segment_index: index,
-                        start_time,
-                    };
-                    one_segment_times.push(segment_time);
-                    next_interval.split(segment_time.start_time);
-                    something_changed = true;
-                }
-                Err(e) => {
-                    tracing::error!("Failed to get segment timestamp for index {index}: {e:?}");
-                    next_interval.remove();
-                }
-            }
-        }
-        if something_changed {
-            let mut value = BTreeMap::new();
-            for OneSegmentTime {
-                segment_index,
-                start_time,
-            } in one_segment_times.iter()
-            {
-                value.insert(*segment_index, *start_time);
-            }
-            let _insert_guard = self.mutexes_insert.lock_mutex(m3u8.clone()).await;
-            match self.segments_time_cache.get(m3u8).await? {
-                None => {}
-                Some(old) => {
-                    for (segment_index, time) in old.iter() {
-                        let segment_index = *segment_index;
-                        let start_time = *time;
-                        if value.insert(segment_index, start_time).is_none() {
-                            one_segment_times.push(OneSegmentTime {
-                                segment_index,
+                    let r = self
+                        .get_segment_time(&original_media_playlist.segments[index].uri, None)
+                        .await;
+
+                    match r {
+                        Ok(start_time) => {
+                            let segment_time = OneSegmentTime {
+                                segment_index: index,
                                 start_time,
-                            });
+                            };
+                            times.push(segment_time);
+                            next_interval.split(segment_time.start_time);
+                            something_changed = true;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to get segment timestamp for index {index}: {e:?}"
+                            );
+                            next_interval.remove();
                         }
                     }
                 }
-            };
-            self.segments_time_cache.insert(m3u8.clone(), value);
+
+                if something_changed {
+                    times.sort_by_key(|t| t.segment_index);
+                }
+                anyhow::Ok(dbg!(times))
+            })
+            .await
+            .map_err(|e| match Arc::try_unwrap(e) {
+                Ok(e) => e,
+                Err(e) => anyhow::anyhow!("{e:?}"),
+            })?;
+
+        if deadline_on.is_some_and(|d| d < tokio::time::Instant::now()) {
+            return Ok(response);
         }
-        Ok(one_segment_times)
+
+        let r = self
+            .segments_time_cache_moka
+            .entry_by_ref(m3u8)
+            .and_compute_with(async |entry| {
+                let mut something_changed = entry.is_none();
+                let mut times = entry.map_or_else(|| response, |entry| entry.into_value());
+
+                let mut intervals =
+                    Interval::new(segments_len, movie_duration, times.iter().cloned());
+
+                while let Some(next_interval) = intervals.next_best_to_split()
+                    && deadline_on.is_some_and(|d| d < tokio::time::Instant::now())
+                {
+                    let duration = next_interval.item().duration();
+                    if duration < self.bigger_time_between_segments {
+                        break;
+                    }
+
+                    let index = next_interval.index();
+
+                    let r = self
+                        .get_segment_time(&original_media_playlist.segments[index].uri, deadline_on)
+                        .await;
+
+                    match r {
+                        Ok(start_time) => {
+                            let segment_time = OneSegmentTime {
+                                segment_index: index,
+                                start_time,
+                            };
+                            times.push(segment_time);
+                            next_interval.split(segment_time.start_time);
+                            something_changed = true;
+                            if let Err(e) = self
+                                .db
+                                .set_segment_info(
+                                    m3u8.imdb,
+                                    &m3u8.server_name,
+                                    &SegmentInfo {
+                                        segment_index: index,
+                                        start_time: Some(start_time as f64),
+                                        size: 0,
+                                    },
+                                    false,
+                                )
+                                .await
+                            {
+                                tracing::error!(
+                                    "Failed to save in the database the segment metadata: {e:?}"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to get segment timestamp for index {index}: {e:?}"
+                            );
+                            next_interval.remove();
+                        }
+                    }
+                }
+
+                if something_changed {
+                    times.sort_by_key(|t| t.segment_index);
+                    Op::Put(times)
+                } else {
+                    Op::Nop
+                }
+            })
+            .await;
+        Ok(r.unwrap().into_value())
     }
 
     pub(super) async fn get_or_fetch(
         &self,
-        segments_data: &HybridCache<SegmentId, bytes::Bytes>,
         m3u8: &M3U8CacheKey,
         original_media_playlist: &MediaPlaylist,
         fast_response: bool,
     ) -> anyhow::Result<Vec<OneSegmentTime>> {
-        let now = tokio::time::Instant::now();
-        let _slow_mutex_guard;
-        if !fast_response {
-            _slow_mutex_guard = self.mutexes_slow.lock_mutex(m3u8.clone()).await;
-        }
-        let fast_mutex_guard = self.mutexes_fast.lock_mutex(m3u8.clone());
-        let segments = self
-            .get_inner(
-                segments_data,
-                m3u8,
-                original_media_playlist,
-                None,
-                self.bigger_time_between_segments,
-            )
-            .await?;
-        if fast_response {
-            return Ok(segments);
-        }
-        drop(fast_mutex_guard);
         let deadline_on = fast_response
-            .then_some(Some(now + self.timeout_fast_time))
+            .then_some(Some(tokio::time::Instant::now() + self.timeout_fast_time))
             .flatten();
-        self.get_inner(
-            segments_data,
-            m3u8,
-            original_media_playlist,
-            deadline_on,
-            self.smaller_time_between_segments,
-        )
-        .await
+        let segments = self
+            .get_inner(m3u8, original_media_playlist, deadline_on)
+            .await?;
+        Ok(segments)
     }
 
-    pub(super) async fn close(&self) -> foyer::Result<()> {
-        self.segments_time_cache.close().await
-    }
+    // TODO: this is not needed. The last acces time should not be updated from here
+    // pub(super) async fn close(&self) -> anyhow::Result<()> {
+    // self.segments_time_cache_moka.invalidate_all();
+    // self.segments_time_cache_moka.run_pending_tasks().await;
+    // }
 }
 
 async fn get_time(
@@ -419,13 +432,14 @@ async fn get_all_times(
 async fn get_all_times_new(
     db: &Database,
     m3u8_key: &M3U8CacheKey,
-) -> anyhow::Result<BTreeMap<usize, f32>> {
+) -> anyhow::Result<Vec<OneSegmentTime>> {
     let r = db
         .get_segments_info(m3u8_key.imdb, &m3u8_key.server_name)
         .try_filter_map(|row| {
-            std::future::ready(Ok(row
-                .start_time
-                .map(|start_time| (row.segment_index, start_time as f32))))
+            std::future::ready(Ok(row.start_time.map(|start_time| OneSegmentTime {
+                start_time: start_time as f32,
+                segment_index: row.segment_index,
+            })))
         })
         .try_collect()
         .await?;

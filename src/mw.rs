@@ -7,6 +7,7 @@ use crate::{custom_extractor::DontLog, error::WebError};
 pub async fn log_request_response(request: Request, next: Next) -> Response {
     let now = std::time::Instant::now();
     let uri = request.uri().clone();
+    tracing::info!("Received request {}", uri);
     let response = next.run(request).await;
     let dont_log = response.extensions().get::<DontLog>().is_some();
     if dont_log {

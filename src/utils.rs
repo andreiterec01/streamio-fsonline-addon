@@ -41,30 +41,30 @@ impl<K: Clone + Eq + Hash> MultipleValueMutex<K> {
     }
 
     pub(crate) async fn lock_mutex(&self, key: K) -> RemoveOnDropGuardOwned<K> {
-        match self.active_mutexes.entry(key) {
+        let value = match self.active_mutexes.entry(key) {
             dashmap::Entry::Occupied(mut entry) => match entry.get().upgrade() {
-                Some(value) => value.lock_owned().await,
+                Some(value) => value,
                 None => {
-                    let value = RemoveOnDrop {
+                    let value = Arc::new(RemoveOnDrop {
                         active_mutexes: self.active_mutexes.clone(),
                         key: entry.key().clone(),
                         mutex: Arc::new(tokio::sync::Mutex::new(())),
-                    };
-                    let value = Arc::new(value);
+                    });
                     entry.insert(Arc::downgrade(&value));
-                    value.lock_owned().await
+                    value
                 }
             },
             dashmap::Entry::Vacant(entry) => {
-                let value = RemoveOnDrop {
+                let value = Arc::new(RemoveOnDrop {
                     active_mutexes: self.active_mutexes.clone(),
                     key: entry.key().clone(),
                     mutex: Arc::new(tokio::sync::Mutex::new(())),
-                };
-                let value = Arc::new(value);
+                });
                 entry.insert(Arc::downgrade(&value));
-                value.lock_owned().await
+                value
             }
-        }
+        };
+
+        value.lock_owned().await
     }
 }

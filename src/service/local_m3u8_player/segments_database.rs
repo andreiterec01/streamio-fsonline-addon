@@ -16,12 +16,16 @@ use sqlx::{
     migrate::{Migrate, MigrateDatabase},
     sqlite::SqliteConnectOptions,
 };
+use tokio::io::AsyncReadExt;
 
 use crate::{
     contracts::{Imdb, Language},
     service::{
         ImdbToVideoServer, PlaylistInfo, PlaylistInfoMetadata, SegmentInfo,
-        local_m3u8_player::{M3U8CacheKey, M3U8Data, SegmentId, SegmentsTime},
+        local_m3u8_player::{
+            M3U8CacheKey, M3U8Data, OneSegmentTime, SegmentId, SegmentsTime,
+            time_cache_db::{self, TimeCache, TimeCacheOptions},
+        },
     },
     ts_parser::TsStartTimeParser,
     utils::MultipleValueMutex,
@@ -141,7 +145,7 @@ impl Database {
         server: &str,
     ) -> impl Stream<Item = sqlx::Result<SegmentInfo>> {
         let segments = sqlx::query!(
-            "SELECT segment, size, start_time FROM segments WHERE imdb=? AND server=?",
+            "SELECT segment, size, start_time FROM segments WHERE imdb=? AND server=? ORDER BY segment",
             imdb.to_u64() as i64,
             server
         )
@@ -159,8 +163,9 @@ impl Database {
         imdb: Imdb,
         server: &str,
         segment_info: &SegmentInfo,
+        was_accesed: bool,
     ) -> anyhow::Result<()> {
-        let now = chrono::Utc::now().timestamp();
+        let now = was_accesed.then(|| chrono::Utc::now().timestamp());
         sqlx::query!(
             "INSERT OR REPLACE INTO segments (imdb, server, segment, size, start_time, last_acces) VALUES (?, ?, ?, ?, ?, ?)",
             imdb.to_u64() as i64,
@@ -169,6 +174,26 @@ impl Database {
             segment_info.size as i64,
             segment_info.start_time,
             now
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn set_last_acces_time(
+        &self,
+        imdb: Imdb,
+        server: &str,
+        index: usize,
+    ) -> anyhow::Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query!(
+            "UPDATE segments SET last_acces=? WHERE imdb=? AND server=? AND segment=?",
+            now,
+            imdb.to_u64() as i64,
+            server,
+            index as i64
         )
         .execute(&self.pool)
         .await?;
@@ -266,10 +291,11 @@ pub struct SegmentsContent<S> {
     pub stream: S,
 }
 
-pub struct NewLocalPlayerOptions {
-    cache_directory: PathBuf,
-    max_total_file_size: u64,
-    metadata_memory_cache_size: u64,
+pub struct NewLocalPlayerOptions<'a> {
+    pub cache_directory: PathBuf,
+    pub max_total_file_size: u64,
+    pub metadata_memory_cache_size: u64,
+    pub time_cache_options: TimeCacheOptions<'a>,
 }
 
 struct CounterWritter {
@@ -301,11 +327,13 @@ fn weigher(key: &M3U8CacheKey, value: &Arc<MediaPlaylist>) -> u32 {
 pub struct NewLocalPlayer {
     client: reqwest::Client,
     db: Database,
+    imdb_to_video_service: ImdbToVideoServer,
+    time_cache: time_cache_db::TimeCache,
+
     cache_directory: Arc<std::path::Path>,
     m3u8_master_files: moka::future::Cache<M3U8CacheKey, Arc<MediaPlaylist>>,
 
-    imdb_to_video_service: ImdbToVideoServer,
-    file_path_mutexes: crate::utils::MultipleValueMutex<M3U8CacheKey>,
+    file_path_mutexes: crate::utils::MultipleValueMutex<(M3U8CacheKey, usize)>,
 
     total_file_size: Arc<std::sync::atomic::AtomicU64>,
     cleanup_in_progress: Arc<std::sync::atomic::AtomicBool>,
@@ -320,17 +348,21 @@ impl NewLocalPlayer {
             cache_directory,
             max_total_file_size,
             metadata_memory_cache_size,
-        }: NewLocalPlayerOptions,
+            time_cache_options,
+        }: NewLocalPlayerOptions<'_>,
     ) -> anyhow::Result<Self> {
         tokio::fs::create_dir_all(&cache_directory).await?;
+        tokio::fs::create_dir_all(&cache_directory.join("tmp")).await?;
         let db = Database::new(&cache_directory.join("metadata.sql")).await?;
         let total_file_size = db.get_total_size().await?;
 
+        let time_cache = TimeCache::new(db.clone(), time_cache_options).await?;
         let m3u8_master_files = moka::future::CacheBuilder::new(metadata_memory_cache_size)
             .weigher(weigher)
             .build();
         Ok(Self {
             client,
+            time_cache,
             db,
             cleanup_in_progress: Arc::new(AtomicBool::new(false)),
             file_path_mutexes: MultipleValueMutex::new(),
@@ -346,6 +378,7 @@ impl NewLocalPlayer {
         segments_directory: &std::path::Path,
         imdb: Imdb,
         server: &str,
+        index: usize,
     ) -> std::path::PathBuf {
         let mut path = segments_directory
             .join("movies")
@@ -355,7 +388,7 @@ impl NewLocalPlayer {
                 .join(series_data.season.to_string())
                 .join(series_data.episode.to_string());
         }
-        path.join(server)
+        path.join(server).join(index.to_string())
     }
 
     fn tmp_file_name(&self) -> DeleteFileOnDrop {
@@ -374,36 +407,66 @@ impl NewLocalPlayer {
         // TODO: implement content_range
         // content_range: Option<std::ops::Range<u64>>,
     ) -> anyhow::Result<
-        SegmentsContent<impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>>>,
+        SegmentsContent<
+            impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + 'static,
+        >,
     > {
+        tracing::info!("Before get segments");
         let segment_files = segment_range.map(async |index| {
-            let path = Self::movie_file_path(&self.cache_directory, imdb, &server);
+            let path = Self::movie_file_path(&self.cache_directory, imdb, &server, index);
 
+            // TODO: this guard is incorrect. We should have a mutex on the segment level, not movie level
             let file_mutex_guard = self
                 .file_path_mutexes
-                .lock_mutex(M3U8CacheKey {
-                    imdb,
-                    server_name: server.clone(),
-                })
+                .lock_mutex((
+                    M3U8CacheKey {
+                        imdb,
+                        server_name: server.clone(),
+                    },
+                    index,
+                ))
                 .await;
             // TODO: before opening the file, we should check a memory cache if it exists. And when we are done reading the file, we should add the entry in the cache
             match tokio::fs::File::open(&path).await {
-                Ok(file) => {
-                    let stream = tokio_util::codec::FramedRead::new(
-                        file,
-                        tokio_util::codec::BytesCodec::new(),
-                    )
-                    .map_ok(bytes::BytesMut::freeze);
-                    let stream = Box::pin(stream)
-                        as Pin<
-                            Box<
-                                dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>>
-                                    + Send,
-                            >,
-                        >;
-                    Ok(stream)
+                Ok(mut file) => {
+                    // let stream = tokio_util::codec::FramedRead::new(
+                    //     file,
+                    //     tokio_util::codec::BytesCodec::new(),
+                    // )
+                    // .map_ok(bytes::BytesMut::freeze);
+                    // let stream = Box::pin(stream)
+                    //     as Pin<
+                    //         Box<
+                    //             dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>>
+                    //                 + Send,
+                    //         >,
+                    //     >;
+                    let db = self.db.clone();
+                    let server = server.clone();
+                    // TODO: when we add a cache for the segments, we should also move this to the eviction listener, keeping the tokio::spawn
+                    tokio::spawn(async move {
+                        if let Err(e) = db.set_last_acces_time(imdb, &server, index).await {
+                            tracing::error!("Failed to set the last acces time: {e:?}");
+                        }
+                    });
+                    let mut data = Vec::new();
+                    file.read_to_end(&mut data).await?;
+                    // let stream = Box::pin(futures::stream::iter([std::io::Result::Ok(
+                    //     bytes::Bytes::from(data),
+                    // )]))
+                    //     as Pin<
+                    //         Box<
+                    //             dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>>
+                    //                 + Send,
+                    //         >,
+                    //     >;
+                    Ok(bytes::Bytes::from(data))
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if let Some(parent) = path.parent() {
+                        tracing::info!("Creating directory {}", parent.display());
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
                     let segment_id = SegmentId {
                         m3u8: M3U8CacheKey {
                             imdb,
@@ -439,6 +502,7 @@ impl NewLocalPlayer {
                                     size: result.len() as u64,
                                     start_time,
                                 },
+                                true,
                             )
                             .await
                         {
@@ -446,7 +510,6 @@ impl NewLocalPlayer {
                             return;
                         }
 
-                        // TODO: save segment info to database before moving the file
                         if let Err(e) = tmp_file.move_to(path).await {
                             tracing::error!("Failed to move temporary segment file: {e:?}");
                             db.delete_segment_local(imdb, &server, index)
@@ -463,21 +526,23 @@ impl NewLocalPlayer {
                         total_file_size
                             .fetch_add(result.len() as u64, std::sync::atomic::Ordering::SeqCst);
                     });
-                    let stream =
-                        Box::pin(futures::stream::iter([std::io::Result::Ok(result_clone)]))
-                            as Pin<
-                                Box<
-                                    dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>>
-                                        + Send,
-                                >,
-                            >;
-                    Ok(stream)
+                    // let stream =
+                    //     Box::pin(futures::stream::iter([std::io::Result::Ok(result_clone)]))
+                    //         as Pin<
+                    //             Box<
+                    //                 dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>>
+                    //                     + Send,
+                    //             >,
+                    //         >;
+                    // Ok(stream)
+                    Ok(result_clone)
                 }
                 Err(e) => Err(e).context("Failed to open segment file"),
             }
         });
         let segment_files = try_join_all(segment_files).await?;
-        let stream = futures::stream::iter(segment_files).flatten();
+        let stream = futures::stream::iter(segment_files).map(Ok);
+        tracing::info!("After get segments");
         Ok(SegmentsContent { stream })
     }
 
@@ -509,7 +574,12 @@ impl NewLocalPlayer {
                         segment,
                     }) = stream.try_next().await?
                     {
-                        let path = Self::movie_file_path(&segments_directory, imdb, &server);
+                        let path = Self::movie_file_path(
+                            &segments_directory,
+                            imdb,
+                            &server,
+                            segment.segment_index,
+                        );
                         let new_size = match tokio::fs::remove_file(&path).await {
                             Ok(_) => {
                                 let new_size = total_file_size
@@ -641,53 +711,52 @@ impl NewLocalPlayer {
         }
     }
 
-    // pub async fn compute_m3u8_real_segments_duration(
-    //     &self,
-    //     m3u8_key: &M3U8CacheKey,
-    //     with_timeout: bool,
-    // ) -> anyhow::Result<Vec<SegmentsTime>> {
-    //     let playlist = self.get_m3u8(m3u8_key).await?;
+    pub async fn compute_m3u8_real_segments_duration(
+        &self,
+        m3u8_key: &M3U8CacheKey,
+        with_timeout: bool,
+    ) -> anyhow::Result<Vec<SegmentsTime>> {
+        let playlist = self.get_m3u8(m3u8_key).await?;
 
-    //     let movie_duration: f32 = playlist.segments.iter().map(|s| s.duration).sum();
-    //     let segments_len = playlist.segments.len();
-    //     // TODO: add the cache back
-    //     _ = self
-    //         .get_segments(m3u8_key.imdb, m3u8_key.server_name.clone(), 0..1)
-    //         .await?;
+        let movie_duration: f32 = playlist.segments.iter().map(|s| s.duration).sum();
+        let segments_len = playlist.segments.len();
+        // TODO: add the cache back
+        _ = self
+            .get_segments(m3u8_key.imdb, m3u8_key.server_name.clone(), 0..1)
+            .await?;
 
-    //     let mut one_segment_times = self
-    //         .time_cache
-    //         .get_or_fetch(&self.segments_data, m3u8_key, &m3u8.playlist, with_timeout)
-    //         .await?;
+        let mut one_segment_times = self
+            .time_cache
+            .get_or_fetch(m3u8_key, &playlist, with_timeout)
+            .await?;
 
-    //     let mut segments = Vec::new();
+        let mut segments = Vec::new();
 
-    //     if !one_segment_times.iter().any(|s| s.segment_index == 0) {
-    //         tracing::error!(
-    //             "There was an error and we didn't received the first segment time. Assuming to be 0"
-    //         );
-    //         one_segment_times.push(OneSegmentTime {
-    //             segment_index: 0,
-    //             start_time: 0.,
-    //         });
-    //     }
-    //     one_segment_times.sort_by_key(|v| v.segment_index);
+        if !one_segment_times.iter().any(|s| s.segment_index == 0) {
+            tracing::error!(
+                "There was an error and we didn't received the first segment time. Assuming to be 0"
+            );
+            one_segment_times.push(OneSegmentTime {
+                segment_index: 0,
+                start_time: 0.,
+            });
+        }
 
-    //     for i in 0..one_segment_times.len() - 1 {
-    //         let segment = SegmentsTime {
-    //             duration: one_segment_times[i + 1].start_time - one_segment_times[i].start_time,
-    //             segments_range: one_segment_times[i].segment_index
-    //                 ..one_segment_times[i + 1].segment_index,
-    //         };
-    //         segments.push(segment);
-    //     }
-    //     let last_segment = one_segment_times.last().unwrap();
-    //     segments.push(SegmentsTime {
-    //         segments_range: last_segment.segment_index..segments_len,
-    //         duration: movie_duration - last_segment.start_time,
-    //     });
-    //     Ok(segments)
-    // }
+        for i in 0..one_segment_times.len() - 1 {
+            let segment = SegmentsTime {
+                duration: one_segment_times[i + 1].start_time - one_segment_times[i].start_time,
+                segments_range: one_segment_times[i].segment_index
+                    ..one_segment_times[i + 1].segment_index,
+            };
+            segments.push(segment);
+        }
+        let last_segment = one_segment_times.last().unwrap();
+        segments.push(SegmentsTime {
+            segments_range: last_segment.segment_index..segments_len,
+            duration: movie_duration - last_segment.start_time,
+        });
+        Ok(segments)
+    }
 
     // TODO: find a way to fix the cache duration
     pub async fn get_m3u8(&self, m3u8_key: &M3U8CacheKey) -> anyhow::Result<Arc<MediaPlaylist>> {
@@ -719,4 +788,6 @@ impl NewLocalPlayer {
 
         Ok(segment_data)
     }
+
+    pub async fn close(&self) {}
 }

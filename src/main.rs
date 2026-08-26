@@ -1,5 +1,6 @@
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -18,7 +19,7 @@ use crate::{
         ImdbToVideoServer,
         fsonline_service::VideoServer,
         imdb_service::ImdbService,
-        local_m3u8_player::{self, LocalPlayer, LocalPlayerConfig},
+        local_m3u8_player::{self, LocalPlayerConfig, segments_database::NewLocalPlayer},
         scrappers::{PlayerScrappers, file_sun::FileSuN, vidmoly::VidmolyScrapper},
     },
 };
@@ -45,7 +46,7 @@ pub struct AppState {
     client: reqwest::Client,
     uses_https: UsesHttps,
     host: Host,
-    local_player: LocalPlayer,
+    local_player: Arc<NewLocalPlayer>,
 }
 
 #[tokio::main]
@@ -84,21 +85,8 @@ async fn main() -> anyhow::Result<()> {
     let video_service = VideoServer::new(client.clone(), scrappers).await?;
     let imdb_server = ImdbService::new(client.clone());
     let imdb_to_video_server = ImdbToVideoServer::new(video_service.clone(), imdb_server);
-    let local_player_config = LocalPlayerConfig {
-        // TODO: make this configurable
-        cache_ttl: Duration::from_secs(3600 * 4),
-        block_size_segments_mb: args.cache_block_size_mb,
-        client: client.clone(),
-        directory_cache: &args.cache_path,
-        master_cache_size_bytes: args.master_cache_size,
-        memory_segments_cache_size: args.memory_segments_cache_size,
-        file_segments_cache_size: args.file_segments_cache_size_mb * 1024 * 1024,
-        cache_next_segments: args.cache_next_segments,
-        parallelism_count: 4,
-        imdb_to_video_service: imdb_to_video_server.clone(),
-    };
 
-    let time_cache_options = local_m3u8_player::time_cache::TimeCacheOptions {
+    let time_cache_options = local_m3u8_player::time_cache_db::TimeCacheOptions {
         client: client.clone(),
         // TODO: make this configurable
         cache_path: std::path::Path::new("./cache-new-timestamp"),
@@ -108,10 +96,22 @@ async fn main() -> anyhow::Result<()> {
         smaller_time_between_segments: args.target_segment_duration,
         timeout_fast_time: Duration::from_secs(args.timeout_waiting_for_playlist_sec),
     };
+    let local_player_config =
+        crate::service::local_m3u8_player::segments_database::NewLocalPlayerOptions {
+            cache_directory: "movies".into(),
+            // TODO: make this 5GB configurable and 5 MB configurable
+            max_total_file_size: 1024 * 1024 * 1024 * 5,
+            metadata_memory_cache_size: 5 * 1024 * 1024,
+            time_cache_options,
+        };
 
-    let time_cache = local_m3u8_player::time_cache::TimeCache::new(time_cache_options).await?;
-
-    let local_player = LocalPlayer::new(time_cache, local_player_config).await?;
+    let local_player = NewLocalPlayer::new(
+        imdb_to_video_server.clone(),
+        client.clone(),
+        local_player_config,
+    )
+    .await?;
+    let local_player = Arc::new(local_player);
     let state = AppState {
         video_service,
         imdb_to_video_server,
@@ -167,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::warn!("Received signal. Waiting for graceful shutdown");
     let r = server.await;
-    local_player.close().await?;
+    local_player.close().await;
     r??;
     Ok(())
 }
