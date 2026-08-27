@@ -487,12 +487,22 @@ impl NewLocalPlayer {
                     self.check_and_start_cleanup_if_needed(result.len() as u64);
 
                     let total_file_size = self.total_file_size.clone();
+                    let time_cache = self.time_cache.clone();
+                    let id = SegmentId {
+                        m3u8: M3U8CacheKey {
+                            imdb,
+                            server_name: server.clone(),
+                        },
+                        segment_index: index,
+                    };
+
                     tokio::spawn(async move {
                         if let Err(e) = tokio::fs::write(&tmp_file.path, &result).await {
                             tracing::error!("Failed to write temporary segment file: {e:?}");
                             return;
                         }
 
+                        // TODO: this should be inside the insert method on time_cache.insert
                         let start_time = TsStartTimeParser::new()
                             .parse_packets(result.clone())
                             .map(|v| v as f64);
@@ -513,6 +523,8 @@ impl NewLocalPlayer {
                             tracing::error!("Failed to save segment info to database: {e:?}");
                             return;
                         }
+
+                        time_cache.insert(&id, &result).await;
 
                         if let Err(e) = tmp_file.move_to(path).await {
                             tracing::error!("Failed to move temporary segment file: {e:?}");

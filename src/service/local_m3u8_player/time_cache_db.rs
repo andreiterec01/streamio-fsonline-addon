@@ -44,7 +44,7 @@ pub struct TimeCache {
     // TODO: we should also save the movie duration and segments count. In case the response changes
     // TODO: change Vec to Arc<[]>
     segments_time_cache_moka: moka::future::Cache<M3U8CacheKey, Vec<OneSegmentTime>>,
-    mutexes_slow: MultipleValueMutex<M3U8CacheKey>,
+    mutexes: MultipleValueMutex<M3U8CacheKey>,
     smaller_time_between_segments: f32,
     bigger_time_between_segments: f32,
     timeout_fast_time: Duration,
@@ -81,7 +81,7 @@ impl TimeCache {
         .build();
 
         Ok(Self {
-            mutexes_slow: MultipleValueMutex::new(),
+            mutexes: MultipleValueMutex::new(),
             smaller_time_between_segments,
             bigger_time_between_segments,
             timeout_fast_time,
@@ -199,9 +199,11 @@ impl TimeCache {
     }
 
     pub(super) async fn insert(&self, id: &SegmentId, content: &bytes::Bytes) {
+        let _guard = self.mutexes.lock_mutex(id.m3u8.clone()).await;
         self.segments_time_cache_moka
             .entry_by_ref(&id.m3u8)
             .and_compute_with(async |entry| {
+                tracing::info!("Entered compute_with");
                 let mut old = match entry {
                     None => {
                         return Op::Nop;
@@ -232,6 +234,7 @@ impl TimeCache {
                 Op::Put(old)
             })
             .await;
+        tracing::info!("Finished with compute_with");
     }
 
     async fn get_inner(
@@ -247,12 +250,15 @@ impl TimeCache {
             .sum();
         let segments_len = original_media_playlist.segments.len();
 
+        let guard = self.mutexes.lock_mutex(m3u8.clone()).await;
         let response = self
             .segments_time_cache_moka
             .try_get_with_by_ref(m3u8, async {
+                tracing::info!("Computed all segment times");
                 // TODO: extract into a function this inner methods
                 // TODO: we should also get the movie segments count and duration. To check them against the original media playlist
                 let mut times = get_all_times_new(&self.db, &m3u8).await?;
+                tracing::info!("Done computing all segment times");
 
                 let mut intervals =
                     Interval::new(segments_len, movie_duration, times.iter().cloned());
@@ -302,7 +308,7 @@ impl TimeCache {
                 Ok(e) => e,
                 Err(e) => anyhow::anyhow!("{e:?}"),
             })?;
-
+        drop(guard);
         if deadline_on.is_some_and(|d| d < tokio::time::Instant::now()) {
             return Ok(response);
         }
