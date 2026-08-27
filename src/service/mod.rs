@@ -1,5 +1,7 @@
 use std::ops::Deref;
 
+use m3u8_rs::MediaPlaylist;
+
 use crate::{
     contracts::{Imdb, MovieKey, MovieOrSeriesDataKey, PlayerData},
     service::{
@@ -16,6 +18,21 @@ pub mod scrappers;
 pub struct PlaylistInfoMetadata {
     pub movie_duration: f64,
     pub total_segments: usize,
+}
+
+impl PlaylistInfoMetadata {
+    pub fn from_playlist(media_playlist: &MediaPlaylist) -> Self {
+        let movie_duration = media_playlist
+            .segments
+            .iter()
+            .map(|s| s.duration as f64)
+            .sum();
+        let total_segments = media_playlist.segments.len();
+        Self {
+            movie_duration,
+            total_segments,
+        }
+    }
 }
 
 pub struct PlaylistInfo {

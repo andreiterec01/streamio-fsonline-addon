@@ -139,6 +139,9 @@ async fn m3u8_segment(
     // }
     let mut headers = HeaderMap::new();
     headers.insert(hyper::header::CONTENT_TYPE, "video/MP2T".parse().unwrap());
-
+    headers.insert(
+        hyper::header::CONTENT_LENGTH,
+        results.len.to_string().parse().unwrap(),
+    );
     Ok(DontLogResponse((headers, body)))
 }

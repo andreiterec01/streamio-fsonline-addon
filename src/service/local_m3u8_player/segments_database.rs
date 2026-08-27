@@ -126,12 +126,14 @@ impl Database {
         server: &str,
         playlist_info: &PlaylistInfoMetadata,
     ) -> anyhow::Result<()> {
+        let now = chrono::Utc::now().timestamp();
         sqlx::query!(
-            "INSERT OR REPLACE INTO movies (imdb, server, segments_count, duration) VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO movies (imdb, server, segments_count, duration, last_acces) VALUES (?, ?, ?, ?, ?)",
             imdb.to_u64() as i64,
             server,
             playlist_info.total_segments as i32,
-            playlist_info.movie_duration
+            playlist_info.movie_duration,
+            now
         )
         .execute(&self.pool)
         .await?;
@@ -198,6 +200,14 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        sqlx::query!(
+            "UPDATE movies SET last_acces=? WHERE imdb=? AND server=?",
+            now,
+            imdb.to_u64() as i64,
+            server
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -249,9 +259,9 @@ LIMIT ?;",
             imdb: Imdb::from_u64(row.imdb as u64),
             server: row.server.into(),
             segment: SegmentInfo {
-                segment_index: 0, // Placeholder, adjust as needed
+                segment_index: row.segment as usize,
                 size: row.size as u64,
-                start_time: None, // Placeholder, adjust as needed
+                start_time: row.start_time,
             },
         })
         .map_err(anyhow::Error::from);
@@ -289,6 +299,7 @@ impl Drop for DeleteFileOnDrop {
 
 pub struct SegmentsContent<S> {
     pub stream: S,
+    pub len: u64,
 }
 
 pub struct NewLocalPlayerOptions<'a> {
@@ -354,13 +365,13 @@ impl NewLocalPlayer {
         tokio::fs::create_dir_all(&cache_directory).await?;
         tokio::fs::create_dir_all(&cache_directory.join("tmp")).await?;
         let db = Database::new(&cache_directory.join("metadata.sql")).await?;
-        let total_file_size = db.get_total_size().await?;
+        let total_file_size = dbg!(db.get_total_size().await?);
 
         let time_cache = TimeCache::new(db.clone(), time_cache_options).await?;
         let m3u8_master_files = moka::future::CacheBuilder::new(metadata_memory_cache_size)
             .weigher(weigher)
             .build();
-        Ok(Self {
+        let this = Self {
             client,
             time_cache,
             db,
@@ -371,7 +382,9 @@ impl NewLocalPlayer {
             total_file_size: Arc::new(AtomicU64::new(total_file_size)),
             cache_directory: cache_directory.into(),
             m3u8_master_files,
-        })
+        };
+        this.check_and_start_cleanup_if_needed(0);
+        Ok(this)
     }
 
     fn movie_file_path(
@@ -411,7 +424,6 @@ impl NewLocalPlayer {
             impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + 'static,
         >,
     > {
-        tracing::info!("Before get segments");
         let segment_files = segment_range.map(async |index| {
             let path = Self::movie_file_path(&self.cache_directory, imdb, &server, index);
 
@@ -428,19 +440,21 @@ impl NewLocalPlayer {
                 .await;
             // TODO: before opening the file, we should check a memory cache if it exists. And when we are done reading the file, we should add the entry in the cache
             match tokio::fs::File::open(&path).await {
-                Ok(mut file) => {
-                    // let stream = tokio_util::codec::FramedRead::new(
-                    //     file,
-                    //     tokio_util::codec::BytesCodec::new(),
-                    // )
-                    // .map_ok(bytes::BytesMut::freeze);
-                    // let stream = Box::pin(stream)
-                    //     as Pin<
-                    //         Box<
-                    //             dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>>
-                    //                 + Send,
-                    //         >,
-                    //     >;
+                Ok(file) => {
+                    // TODO: a query to the database should be faster to compute the len
+                    let len = file.metadata().await?.len();
+                    let stream = tokio_util::codec::FramedRead::new(
+                        file,
+                        tokio_util::codec::BytesCodec::new(),
+                    )
+                    .map_ok(bytes::BytesMut::freeze);
+                    let stream = Box::pin(stream)
+                        as Pin<
+                            Box<
+                                dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>>
+                                    + Send,
+                            >,
+                        >;
                     let db = self.db.clone();
                     let server = server.clone();
                     // TODO: when we add a cache for the segments, we should also move this to the eviction listener, keeping the tokio::spawn
@@ -449,18 +463,8 @@ impl NewLocalPlayer {
                             tracing::error!("Failed to set the last acces time: {e:?}");
                         }
                     });
-                    let mut data = Vec::new();
-                    file.read_to_end(&mut data).await?;
-                    // let stream = Box::pin(futures::stream::iter([std::io::Result::Ok(
-                    //     bytes::Bytes::from(data),
-                    // )]))
-                    //     as Pin<
-                    //         Box<
-                    //             dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>>
-                    //                 + Send,
-                    //         >,
-                    //     >;
-                    Ok(bytes::Bytes::from(data))
+
+                    Ok((stream, len))
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     if let Some(parent) = path.parent() {
@@ -525,25 +529,30 @@ impl NewLocalPlayer {
                         drop(file_mutex_guard);
                         total_file_size
                             .fetch_add(result.len() as u64, std::sync::atomic::Ordering::SeqCst);
+                        //TODO: This sets for a second time the last acces time for the segment. We should only do this for the movie
+                        if let Err(e) = db.set_last_acces_time(imdb, &server, index).await {
+                            tracing::error!("Failed to set last acces time: {e:?}");
+                        }
                     });
-                    // let stream =
-                    //     Box::pin(futures::stream::iter([std::io::Result::Ok(result_clone)]))
-                    //         as Pin<
-                    //             Box<
-                    //                 dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>>
-                    //                     + Send,
-                    //             >,
-                    //         >;
-                    // Ok(stream)
-                    Ok(result_clone)
+                    let len = result_clone.len() as u64;
+                    let stream =
+                        Box::pin(futures::stream::iter([std::io::Result::Ok(result_clone)]))
+                            as Pin<
+                                Box<
+                                    dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>>
+                                        + Send,
+                                >,
+                            >;
+                    Ok((stream, len))
                 }
                 Err(e) => Err(e).context("Failed to open segment file"),
             }
         });
         let segment_files = try_join_all(segment_files).await?;
-        let stream = futures::stream::iter(segment_files).map(Ok);
-        tracing::info!("After get segments");
-        Ok(SegmentsContent { stream })
+        let len = segment_files.iter().map(|(_, len)| len).sum();
+        let stream =
+            futures::stream::iter(segment_files.into_iter().map(|(stream, _)| stream)).flatten();
+        Ok(SegmentsContent { stream, len })
     }
 
     // TODO: finish this function and call it in get_segments
@@ -560,6 +569,7 @@ impl NewLocalPlayer {
             if was_cleanup_in_progress {
                 return;
             }
+            tracing::warn!("Starting cleanup");
             let db = self.db.clone();
             let segments_directory = self.cache_directory.clone();
             let total_file_size = self.total_file_size.clone();
@@ -567,13 +577,17 @@ impl NewLocalPlayer {
             let max_total_file_size = self.max_total_file_size;
             let cleanup_future = async move {
                 'enough_memory: loop {
-                    let mut stream = db.get_least_accessed(least_accesed_count);
-                    while let Some(LeastAccessedSegment {
+                    let stream = db
+                        .get_least_accessed(least_accesed_count)
+                        .try_collect::<Vec<_>>()
+                        .await?;
+                    for LeastAccessedSegment {
                         imdb,
                         server,
                         segment,
-                    }) = stream.try_next().await?
+                    } in stream
                     {
+                        tracing::info!("Received value {imdb} {}", segment.segment_index);
                         let path = Self::movie_file_path(
                             &segments_directory,
                             imdb,
@@ -582,6 +596,7 @@ impl NewLocalPlayer {
                         );
                         let new_size = match tokio::fs::remove_file(&path).await {
                             Ok(_) => {
+                                tracing::info!("removed {}", path.display());
                                 let new_size = total_file_size
                                     .fetch_sub(segment.size, std::sync::atomic::Ordering::SeqCst)
                                     - segment.size;
@@ -622,6 +637,8 @@ impl NewLocalPlayer {
                             break 'enough_memory;
                         }
                     }
+
+                    tracing::info!("Loop ended, but we didn't cleanup enough");
                 }
 
                 anyhow::Ok(())
@@ -647,6 +664,7 @@ impl NewLocalPlayer {
         imdb_to_video_service: &ImdbToVideoServer,
         client: &reqwest::Client,
         m3u8_key: &M3U8CacheKey,
+        db: &Database,
     ) -> anyhow::Result<Arc<MediaPlaylist>> {
         let r = m3u8_master_files
             .try_get_with_by_ref(m3u8_key, async {
@@ -698,6 +716,16 @@ impl NewLocalPlayer {
 
                 let playlist = m3u8_rs::parse_media_playlist_res(&playlist_data)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+                // TODO: add a check here. If the metadata changed, this means we should remove all the segments data
+                // TODO: we can also check at the beginning if we have all the segments. If we do, we can skip the request to fsonline
+                db.set_playlist_metadata(
+                    m3u8_key.imdb,
+                    &m3u8_key.server_name,
+                    &PlaylistInfoMetadata::from_playlist(&playlist),
+                )
+                .await?;
+
                 anyhow::Ok(Arc::new(playlist))
             })
             .await;
@@ -765,6 +793,7 @@ impl NewLocalPlayer {
             &self.imdb_to_video_service,
             &self.client,
             m3u8_key,
+            &self.db,
         )
         .await
     }

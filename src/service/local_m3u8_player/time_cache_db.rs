@@ -295,7 +295,7 @@ impl TimeCache {
                 if something_changed {
                     times.sort_by_key(|t| t.segment_index);
                 }
-                anyhow::Ok(dbg!(times))
+                anyhow::Ok(times)
             })
             .await
             .map_err(|e| match Arc::try_unwrap(e) {
@@ -408,25 +408,6 @@ async fn get_time(
     let r = segment_data.get(id).await.ok()??;
     let time = ts_parser::TsStartTimeParser::new().parse_packets(r.value().clone())?;
     Some(time)
-}
-
-async fn get_all_times(
-    segment_data: &HybridCache<SegmentId, bytes::Bytes>,
-    m3u8_key: &M3U8CacheKey,
-    segments: usize,
-) -> BTreeMap<usize, f32> {
-    let values = (0..segments).map(async |i| {
-        get_time(
-            segment_data,
-            &SegmentId {
-                m3u8: m3u8_key.clone(),
-                segment_index: i,
-            },
-        )
-        .await
-        .and_then(|time| Some((i, time)))
-    });
-    join_all(values).await.into_iter().flatten().collect()
 }
 
 async fn get_all_times_new(
