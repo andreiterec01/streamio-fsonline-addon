@@ -288,6 +288,18 @@ impl TimeCache {
                             times.push(segment_time);
                             next_interval.split(segment_time.start_time);
                             something_changed = true;
+                            self.db
+                                .set_segment_info(
+                                    m3u8.imdb,
+                                    &m3u8.server_name,
+                                    &SegmentInfo {
+                                        segment_index: index,
+                                        size: 0,
+                                        start_time: Some(start_time as f64),
+                                    },
+                                    false,
+                                )
+                                .await?;
                         }
                         Err(e) => {
                             tracing::error!(

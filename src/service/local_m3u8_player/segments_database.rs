@@ -168,8 +168,13 @@ impl Database {
         was_accesed: bool,
     ) -> anyhow::Result<()> {
         let now = was_accesed.then(|| chrono::Utc::now().timestamp());
+
         sqlx::query!(
-            "INSERT OR REPLACE INTO segments (imdb, server, segment, size, start_time, last_acces) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO segments (imdb, server, segment, size, start_time, last_acces) VALUES (?, ?, ?, ?, ?, ?) \
+            ON CONFLICT(imdb, server, segment) DO UPDATE SET \
+            size=MAX(EXCLUDED.size, size), \
+            start_time=COALESCE(EXCLUDED.start_time, start_time), \
+            last_acces=COALESCE(EXCLUDED.last_acces, last_acces)",
             imdb.to_u64() as i64,
             server,
             segment_info.segment_index as i32,
@@ -764,6 +769,11 @@ impl NewLocalPlayer {
         _ = self
             .get_segments(m3u8_key.imdb, m3u8_key.server_name.clone(), 0..1)
             .await?;
+
+        // waiting to be added the 0 element to the cache
+        self.file_path_mutexes
+            .lock_mutex((m3u8_key.clone(), 0))
+            .await;
 
         let mut one_segment_times = self
             .time_cache

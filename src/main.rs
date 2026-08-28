@@ -19,7 +19,7 @@ use crate::{
         ImdbToVideoServer,
         fsonline_service::VideoServer,
         imdb_service::ImdbService,
-        local_m3u8_player::{self, LocalPlayerConfig, segments_database::NewLocalPlayer},
+        local_m3u8_player::{self, segments_database::NewLocalPlayer},
         scrappers::{PlayerScrappers, file_sun::FileSuN, vidmoly::VidmolyScrapper},
     },
 };
