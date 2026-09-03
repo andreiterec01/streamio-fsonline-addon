@@ -5,15 +5,15 @@ use mpeg2ts_reader::packet::Packet;
 use mpeg2ts_reader::pes::PesPacketFilter;
 use mpeg2ts_reader::psi;
 
-pub struct TsStartTimeParser {
+pub struct TsTimeParser {
     last_packet: Bytes,
     ctx: PcrDumpDemuxContext,
     demux: demultiplex::Demultiplex<PcrDumpDemuxContext>,
 }
 
-impl TsStartTimeParser {
-    pub fn new() -> Self {
-        let mut ctx = PcrDumpDemuxContext::new();
+impl TsTimeParser {
+    pub fn new(only_start_time: bool) -> Self {
+        let mut ctx = PcrDumpDemuxContext::new(only_start_time);
 
         // create the demultiplexer, which will use the ctx to create a filter for pid 0 (PAT)
         let demux = demultiplex::Demultiplex::new(&mut ctx);
@@ -25,7 +25,7 @@ impl TsStartTimeParser {
         }
     }
 
-    pub fn parse_packets(&mut self, mut packet: Bytes) -> Option<f32> {
+    pub fn parse_packets(&mut self, mut packet: Bytes) {
         let remaining = if !self.last_packet.is_empty() {
             let remaining = Packet::SIZE - self.last_packet.len();
             if remaining < packet.len() {
@@ -48,8 +48,19 @@ impl TsStartTimeParser {
         self.demux.push(&mut self.ctx, &packet_bytes[..packet_len]);
 
         self.last_packet = packet.split_off(remaining + packet_len);
+    }
 
-        self.ctx.seconds
+    pub fn parse_and_return_start_time(&mut self, packet: Bytes) -> Option<f32> {
+        self.parse_packets(packet);
+        self.start_time()
+    }
+
+    pub fn start_time(&self) -> Option<f32> {
+        self.ctx.seconds_first
+    }
+
+    pub fn end_time(&self) -> Option<f32> {
+        self.ctx.seconds_last
     }
 }
 
@@ -62,14 +73,20 @@ mpeg2ts_reader::packet_filter_switch! {
         Pes: PesPacketFilter<PcrDumpDemuxContext, FirstPtsConsumer>,
     }
 }
-#[derive(Default)]
 pub struct PcrDumpDemuxContext {
     changeset: demultiplex::FilterChangeset<PcrDumpFilterSwitch>,
-    seconds: Option<f32>,
+    seconds_first: Option<f32>,
+    seconds_last: Option<f32>,
+    only_start_time: bool,
 }
 impl PcrDumpDemuxContext {
-    fn new() -> Self {
-        Self::default()
+    fn new(only_start_time: bool) -> Self {
+        Self {
+            changeset: demultiplex::FilterChangeset::default(),
+            seconds_first: None,
+            seconds_last: None,
+            only_start_time,
+        }
     }
 }
 
@@ -81,7 +98,7 @@ impl DemuxContext for PcrDumpDemuxContext {
     }
 
     fn construct(&mut self, req: demultiplex::FilterRequest<'_, '_>) -> PcrDumpFilterSwitch {
-        if self.seconds.is_some() {
+        if self.only_start_time && self.seconds_first.is_some() {
             return PcrDumpFilterSwitch::Null(demultiplex::NullPacketFilter::default());
         }
         match req {
@@ -124,7 +141,7 @@ impl mpeg2ts_reader::pes::ElementaryStreamConsumer<PcrDumpDemuxContext> for Firs
         ctx: &mut PcrDumpDemuxContext,
         header: mpeg2ts_reader::pes::PesHeader<'_>,
     ) {
-        if ctx.seconds.is_some() {
+        if ctx.only_start_time && ctx.seconds_first.is_some() {
             return;
         }
         if let mpeg2ts_reader::pes::PesContents::Parsed(Some(parsed)) = header.contents() {
@@ -134,7 +151,10 @@ impl mpeg2ts_reader::pes::ElementaryStreamConsumer<PcrDumpDemuxContext> for Firs
                 mpeg2ts_reader::pes::PtsDts::PtsOnly(Ok(pts))
                 | mpeg2ts_reader::pes::PtsDts::Both { pts: Ok(pts), .. } => {
                     let seconds = pts.value() as f32 / 90_000.0;
-                    ctx.seconds = Some(seconds);
+                    ctx.seconds_last = Some(seconds);
+                    if ctx.seconds_first.is_none() {
+                        ctx.seconds_first = Some(seconds);
+                    }
                 }
                 _ => {}
             }
@@ -153,20 +173,37 @@ mod tests {
     use bytes::Bytes;
     use mpeg2ts_reader::packet::Packet;
 
-    use crate::ts_parser::TsStartTimeParser;
+    use crate::ts_parser::TsTimeParser;
 
     #[test]
     fn test_ts_parser() {
         let seg = include_bytes!("../test_files/seg.ts");
         assert_eq!(seg.len() % Packet::SIZE, 0);
-        let mut parser = TsStartTimeParser::new();
+        let mut parser = TsTimeParser::new(true);
         for chunk in seg.chunks(Packet::SIZE - 1) {
-            let r = parser.parse_packets(Bytes::from_static(chunk));
-            if r.is_some() {
+            parser.parse_packets(Bytes::from_static(chunk));
+            if parser.start_time().is_some() {
                 return;
             }
         }
 
         panic!("Didn't received the start time");
+    }
+
+    #[test]
+    fn test_ts_parser_end_time() {
+        let seg = include_bytes!("../test_files/seg.ts");
+        assert_eq!(seg.len() % Packet::SIZE, 0);
+        let mut parser = TsTimeParser::new(false);
+        for chunk in seg.chunks(Packet::SIZE - 1) {
+            parser.parse_packets(Bytes::from_static(chunk));
+        }
+
+        let start_time = parser.start_time().unwrap();
+        let end_time = parser.end_time().unwrap();
+        assert!(
+            end_time - start_time > 10.,
+            "End time({end_time:.2}) should be greater than start time({start_time:.2}) by at least 10 seconds"
+        );
     }
 }

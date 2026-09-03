@@ -14,7 +14,10 @@ use crate::{
     contracts::Imdb,
     custom_extractor::{DontLogResponse, axum_range::Ranged},
     error::WebResult,
-    service::local_m3u8_player::{M3U8CacheKey, SegmentId, segments_database::NewLocalPlayer},
+    service::local_m3u8_player::{
+        M3U8CacheKey, SegmentId,
+        segments_database::{LocalPlayer, LocalPlayerInner},
+    },
 };
 
 pub(super) fn routes() -> Router<AppState> {
@@ -45,7 +48,7 @@ struct SegmentRequest {
 }
 
 async fn create_new_playlist(
-    player: &NewLocalPlayer,
+    player: &LocalPlayer,
     protocol: &str,
     host: &str,
     key: &M3U8CacheKey,
@@ -84,7 +87,7 @@ async fn create_new_playlist(
 }
 
 async fn m3u8_playlist(
-    local_player: State<Arc<NewLocalPlayer>>,
+    local_player: State<LocalPlayer>,
     Path(path): Path<ServerNameAndImdb>,
     State(UsesHttps(uses_https)): State<UsesHttps>,
     State(crate::Host(host)): State<crate::Host>,
@@ -93,7 +96,7 @@ async fn m3u8_playlist(
         imdb: path.imdb,
         server_name: path.server_name.into(),
     };
-    let metadata = local_player.get_m3u8(&key).await?;
+    let metadata = local_player.inner.get_m3u8(&key).await?;
 
     let protocol = if uses_https { "https" } else { "http" };
 
@@ -110,7 +113,7 @@ async fn m3u8_playlist(
 }
 
 async fn m3u8_segment(
-    local_player: State<Arc<NewLocalPlayer>>,
+    local_player: State<LocalPlayer>,
     Path(path): Path<SegmentRequest>,
     // range: Option<TypedHeader<axum_extra::headers::Range>>,
 ) -> WebResult<DontLogResponse<(HeaderMap, axum::body::Body)>> {

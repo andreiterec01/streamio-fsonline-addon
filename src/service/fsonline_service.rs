@@ -21,6 +21,8 @@ pub struct MovieData {
 
 #[derive(Clone)]
 pub struct VideoServer {
+    // TODO: maybe remove the cache from here? And only use the cache from the LocalPlayer.
+    // This way the cache from LocalPlayer doesn't expires at a different time than the cache from VideoServer.
     cache: moka::future::Cache<MovieKey, Arc<[PlayerData]>>,
     player_scrapper: Arc<scrappers::PlayerScrappers>,
     client: reqwest::Client,

@@ -19,7 +19,10 @@ use crate::{
         ImdbToVideoServer,
         fsonline_service::VideoServer,
         imdb_service::ImdbService,
-        local_m3u8_player::{self, segments_database::NewLocalPlayer},
+        local_m3u8_player::{
+            self,
+            segments_database::{LocalPlayer, LocalPlayerInner},
+        },
         scrappers::{PlayerScrappers, file_sun::FileSuN, vidmoly::VidmolyScrapper},
     },
 };
@@ -46,7 +49,7 @@ pub struct AppState {
     client: reqwest::Client,
     uses_https: UsesHttps,
     host: Host,
-    local_player: Arc<NewLocalPlayer>,
+    local_player: LocalPlayer,
 }
 
 #[tokio::main]
@@ -105,13 +108,12 @@ async fn main() -> anyhow::Result<()> {
             time_cache_options,
         };
 
-    let local_player = NewLocalPlayer::new(
+    let local_player = LocalPlayer::new(
         imdb_to_video_server.clone(),
         client.clone(),
         local_player_config,
     )
     .await?;
-    let local_player = Arc::new(local_player);
     let state = AppState {
         video_service,
         imdb_to_video_server,
@@ -167,7 +169,8 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::warn!("Received signal. Waiting for graceful shutdown");
     let r = server.await;
-    local_player.close().await;
+    // TODO: we should stop the cache before
+    local_player.inner.close().await;
     r??;
     Ok(())
 }

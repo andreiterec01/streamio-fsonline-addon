@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, BinaryHeap, HashMap},
     ops::Deref,
     path::{Path, PathBuf},
     pin::Pin,
@@ -6,12 +7,14 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64},
     },
+    time::Duration,
 };
 
 use anyhow::Context;
 use bytes::Bytes;
 use futures::{Stream, StreamExt, TryStreamExt, future::try_join_all};
 use m3u8_rs::MediaPlaylist;
+use mut_binary_heap::MaxComparator;
 use sqlx::{
     migrate::{Migrate, MigrateDatabase},
     sqlite::SqliteConnectOptions,
@@ -24,10 +27,12 @@ use crate::{
         ImdbToVideoServer, PlaylistInfo, PlaylistInfoMetadata, SegmentInfo,
         local_m3u8_player::{
             M3U8CacheKey, M3U8Data, OneSegmentTime, SegmentId, SegmentsTime,
+            populate_cache::LoadCacheRequest,
             time_cache_db::{self, TimeCache, TimeCacheOptions},
         },
+        small_cache,
     },
-    ts_parser::TsStartTimeParser,
+    ts_parser::TsTimeParser,
     utils::MultipleValueMutex,
 };
 
@@ -297,7 +302,7 @@ impl DeleteFileOnDrop {
 impl Drop for DeleteFileOnDrop {
     fn drop(&mut self) {
         if self.delete_on_drop {
-            std::fs::remove_file(&self.path).ok();
+            LocalPlayerInner::delete_file_sync(&self.path).ok();
         }
     }
 }
@@ -340,11 +345,60 @@ fn weigher(key: &M3U8CacheKey, value: &Arc<MediaPlaylist>) -> u32 {
     (key.size() + writer.size) as u32
 }
 
-pub struct NewLocalPlayer {
+#[derive(Clone)]
+pub struct LocalPlayer {
+    // TODO: make the inner field private again
+    pub inner: Arc<LocalPlayerInner>,
+    load_cache_sender: tokio::sync::mpsc::UnboundedSender<LoadCacheRequest>,
+}
+
+impl LocalPlayer {
+    pub async fn get_segments(
+        &self,
+        imdb: Imdb,
+        server: Arc<str>,
+        segment_range: std::ops::Range<usize>,
+    ) -> anyhow::Result<
+        SegmentsContent<
+            impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + 'static,
+        >,
+    > {
+        let end = segment_range.end;
+        // TODO: remove the unwrap
+        self.load_cache_sender
+            .send(LoadCacheRequest {
+                segment_id: SegmentId {
+                    m3u8: M3U8CacheKey {
+                        imdb,
+                        server_name: server.clone(),
+                    },
+                    segment_index: end,
+                },
+                // TODO: 20 minutes is harcoded. We should make this configurable
+                time_remaining: 20. * 60.,
+            })
+            .unwrap();
+        // TODO: remove this log
+        tracing::info!("Sent load cache request for segment: {:?}", end,);
+        self.inner.get_segments(imdb, server, segment_range).await
+    }
+
+    pub async fn compute_m3u8_real_segments_duration(
+        &self,
+        m3u8_key: &M3U8CacheKey,
+        with_timeout: bool,
+    ) -> anyhow::Result<Vec<SegmentsTime>> {
+        self.inner
+            .compute_m3u8_real_segments_duration(m3u8_key, with_timeout)
+            .await
+    }
+}
+
+pub struct LocalPlayerInner {
     client: reqwest::Client,
     db: Database,
     imdb_to_video_service: ImdbToVideoServer,
-    time_cache: time_cache_db::TimeCache,
+    pub(super) time_cache: time_cache_db::TimeCache,
 
     cache_directory: Arc<std::path::Path>,
     m3u8_master_files: moka::future::Cache<M3U8CacheKey, Arc<MediaPlaylist>>,
@@ -356,7 +410,7 @@ pub struct NewLocalPlayer {
     max_total_file_size: u64,
 }
 
-impl NewLocalPlayer {
+impl LocalPlayer {
     pub async fn new(
         imdb_to_video_service: ImdbToVideoServer,
         client: reqwest::Client,
@@ -376,7 +430,7 @@ impl NewLocalPlayer {
         let m3u8_master_files = moka::future::CacheBuilder::new(metadata_memory_cache_size)
             .weigher(weigher)
             .build();
-        let this = Self {
+        let inner = LocalPlayerInner {
             client,
             time_cache,
             db,
@@ -388,15 +442,25 @@ impl NewLocalPlayer {
             cache_directory: cache_directory.into(),
             m3u8_master_files,
         };
-        this.check_and_start_cleanup_if_needed(0);
+        inner.check_and_start_cleanup_if_needed(0);
+        let inner = Arc::new(inner);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        // TODO: use a cancellation token to stop the task
+        tokio::spawn(inner.clone().load_cache(rx));
+        let this = Self {
+            inner,
+            load_cache_sender: tx,
+        };
+
         Ok(this)
     }
+}
 
-    fn movie_file_path(
+impl LocalPlayerInner {
+    fn directory_movie_file_path(
         segments_directory: &std::path::Path,
         imdb: Imdb,
         server: &str,
-        index: usize,
     ) -> std::path::PathBuf {
         let mut path = segments_directory
             .join("movies")
@@ -406,7 +470,16 @@ impl NewLocalPlayer {
                 .join(series_data.season.to_string())
                 .join(series_data.episode.to_string());
         }
-        path.join(server).join(index.to_string())
+        path.join(server)
+    }
+
+    fn movie_file_path(
+        segments_directory: &std::path::Path,
+        imdb: Imdb,
+        server: &str,
+        index: usize,
+    ) -> std::path::PathBuf {
+        Self::directory_movie_file_path(segments_directory, imdb, server).join(index.to_string())
     }
 
     fn tmp_file_name(&self) -> DeleteFileOnDrop {
@@ -432,7 +505,6 @@ impl NewLocalPlayer {
         let segment_files = segment_range.map(async |index| {
             let path = Self::movie_file_path(&self.cache_directory, imdb, &server, index);
 
-            // TODO: this guard is incorrect. We should have a mutex on the segment level, not movie level
             let file_mutex_guard = self
                 .file_path_mutexes
                 .lock_mutex((
@@ -508,8 +580,8 @@ impl NewLocalPlayer {
                         }
 
                         // TODO: this should be inside the insert method on time_cache.insert
-                        let start_time = TsStartTimeParser::new()
-                            .parse_packets(result.clone())
+                        let start_time = TsTimeParser::new(true)
+                            .parse_and_return_start_time(result.clone())
                             .map(|v| v as f64);
 
                         if let Err(e) = db
@@ -838,6 +910,55 @@ impl NewLocalPlayer {
             .await?;
 
         Ok(segment_data)
+    }
+
+    #[cfg(windows)]
+    async fn delete_file(path: impl AsRef<Path>) -> anyhow::Result<()> {
+        const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x04000000;
+        tokio::fs::File::options()
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+            .open(path)
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    async fn delete_file(path: impl AsRef<Path>) -> anyhow::Result<()> {
+        tokio::fs::remove_file(path).await?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn delete_file_sync(path: impl AsRef<Path>) -> anyhow::Result<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x04000000;
+        std::fs::File::options()
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+            .open(path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    async fn delete_file_sync(path: impl AsRef<Path>) -> anyhow::Result<()> {
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    async fn delete_full_movie(&self, m3u8_key: &M3U8CacheKey) -> anyhow::Result<()> {
+        let directory = Self::directory_movie_file_path(
+            &self.cache_directory,
+            m3u8_key.imdb,
+            &m3u8_key.server_name,
+        );
+        let mut directory_content = tokio::fs::read_dir(&directory).await?;
+        while let Some(file) = directory_content.next_entry().await? {
+            let path = file.path();
+            Self::delete_file(path).await?;
+        }
+        // TODO: also delete from the database. Make sure nothing is added to this movie while we delete the full movie
+        // We need some mutex for this
+        Ok(())
     }
 
     pub async fn close(&self) {}

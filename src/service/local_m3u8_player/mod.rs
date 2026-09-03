@@ -9,6 +9,7 @@ use foyer::{
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 mod intervals;
+mod populate_cache;
 pub mod segments_database;
 pub(crate) mod time_cache_db;
 use crate::{

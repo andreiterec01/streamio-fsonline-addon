@@ -110,7 +110,7 @@ impl TimeCache {
         let mut content_length = None;
         for _ in 0..10 {
             let mut f = async |range: std::ops::Range<usize>| {
-                let mut parser = ts_parser::TsStartTimeParser::new();
+                let mut parser = ts_parser::TsTimeParser::new(true);
                 let start = range.start * Packet::SIZE;
                 let mut end = Some(range.end * Packet::SIZE);
                 if let Some(content_length) = content_length {
@@ -154,7 +154,7 @@ impl TimeCache {
                 while let Some(bytes) =
                     bytes_stream.try_next().await.map_err(anyhow::Error::from)?
                 {
-                    if let Some(seconds) = parser.parse_packets(bytes) {
+                    if let Some(seconds) = parser.parse_and_return_start_time(bytes) {
                         duration = Some(seconds);
                         break;
                     }
@@ -203,7 +203,6 @@ impl TimeCache {
         self.segments_time_cache_moka
             .entry_by_ref(&id.m3u8)
             .and_compute_with(async |entry| {
-                tracing::info!("Entered compute_with");
                 let mut old = match entry {
                     None => {
                         return Op::Nop;
@@ -218,8 +217,8 @@ impl TimeCache {
                     Err(index) => index,
                 };
 
-                let mut parser = ts_parser::TsStartTimeParser::new();
-                let Some(time) = parser.parse_packets(content.clone()) else {
+                let mut parser = ts_parser::TsTimeParser::new(true);
+                let Some(time) = parser.parse_and_return_start_time(content.clone()) else {
                     tracing::warn!("Received packet for {id:?}, but we failed to parse it");
                     return Op::Nop;
                 };
@@ -227,14 +226,13 @@ impl TimeCache {
                 old.insert(
                     index,
                     OneSegmentTime {
-                        segment_index: index,
+                        segment_index: id.segment_index,
                         start_time: time,
                     },
                 );
                 Op::Put(old)
             })
             .await;
-        tracing::info!("Finished with compute_with");
     }
 
     async fn get_inner(
@@ -260,6 +258,7 @@ impl TimeCache {
                 let mut times = get_all_times_new(&self.db, &m3u8).await?;
                 tracing::info!("Done computing all segment times");
 
+                dbg!(&times, segments_len);
                 let mut intervals =
                     Interval::new(segments_len, movie_duration, times.iter().cloned());
 
@@ -331,6 +330,8 @@ impl TimeCache {
             .and_compute_with(async |entry| {
                 let mut something_changed = entry.is_none();
                 let mut times = entry.map_or_else(|| response, |entry| entry.into_value());
+
+                dbg!(&times, segments_len);
 
                 let mut intervals =
                     Interval::new(segments_len, movie_duration, times.iter().cloned());
@@ -424,7 +425,7 @@ async fn get_time(
     id: &SegmentId,
 ) -> Option<f32> {
     let r = segment_data.get(id).await.ok()??;
-    let time = ts_parser::TsStartTimeParser::new().parse_packets(r.value().clone())?;
+    let time = ts_parser::TsTimeParser::new(true).parse_and_return_start_time(r.value().clone())?;
     Some(time)
 }
 
