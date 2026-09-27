@@ -1,10 +1,7 @@
-use std::sync::Arc;
-
 use axum::{
     Router,
     extract::{Path, State},
 };
-use axum_extra::TypedHeader;
 use hyper::HeaderMap;
 use m3u8_rs::{MediaPlaylist, MediaSegment};
 use serde::Deserialize;
@@ -12,12 +9,9 @@ use serde::Deserialize;
 use crate::{
     AppState, UsesHttps,
     contracts::Imdb,
-    custom_extractor::{DontLogResponse, axum_range::Ranged},
+    custom_extractor::DontLogResponse,
     error::WebResult,
-    service::local_m3u8_player::{
-        M3U8CacheKey, SegmentId,
-        segments_database::{LocalPlayer, LocalPlayerInner},
-    },
+    service::local_m3u8_player::{M3U8CacheKey, segments_database::LocalPlayer},
 };
 
 pub(super) fn routes() -> Router<AppState> {

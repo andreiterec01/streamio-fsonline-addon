@@ -1,5 +1,4 @@
 use std::{
-    collections::{BTreeMap, BinaryHeap, HashMap},
     ops::Deref,
     path::{Path, PathBuf},
     pin::Pin,
@@ -13,24 +12,19 @@ use std::{
 use anyhow::Context;
 use bytes::Bytes;
 use futures::{Stream, StreamExt, TryStreamExt, future::try_join_all};
+use itertools::Itertools;
 use m3u8_rs::MediaPlaylist;
-use mut_binary_heap::MaxComparator;
-use sqlx::{
-    migrate::{Migrate, MigrateDatabase},
-    sqlite::SqliteConnectOptions,
-};
-use tokio::io::AsyncReadExt;
+use sqlx::sqlite::SqliteConnectOptions;
 
 use crate::{
     contracts::{Imdb, Language},
     service::{
-        ImdbToVideoServer, PlaylistInfo, PlaylistInfoMetadata, SegmentInfo,
+        ImdbToVideoServer, PlaylistInfoMetadata, SegmentInfo,
         local_m3u8_player::{
-            M3U8CacheKey, M3U8Data, OneSegmentTime, SegmentId, SegmentsTime,
+            M3U8CacheKey, OneSegmentTime, SegmentId, SegmentsTime,
             populate_cache::LoadCacheRequest,
             time_cache_db::{self, TimeCache, TimeCacheOptions},
         },
-        small_cache,
     },
     ts_parser::TsTimeParser,
     utils::MultipleValueMutex,
@@ -62,6 +56,8 @@ impl Database {
         Ok(Self { pool })
     }
 
+    // TODO: download the subtitles and store them
+    #[allow(dead_code)]
     pub async fn get_subtitle_content(
         &self,
         imdb: Imdb,
@@ -83,6 +79,8 @@ impl Database {
         Ok(Some(record.text))
     }
 
+    // TODO: download the subtitles and store them
+    #[allow(dead_code)]
     pub async fn set_subtitle_content(
         &self,
         imdb: Imdb,
@@ -151,7 +149,7 @@ impl Database {
         imdb: Imdb,
         server: &str,
     ) -> impl Stream<Item = sqlx::Result<SegmentInfo>> {
-        let segments = sqlx::query!(
+        sqlx::query!(
             "SELECT segment, size, start_time FROM segments WHERE imdb=? AND server=? ORDER BY segment",
             imdb.to_u64() as i64,
             server
@@ -161,8 +159,7 @@ impl Database {
             segment_index: v.segment as usize,
             size: v.size as u64,
             start_time: v.start_time,
-        });
-        segments
+        })
     }
 
     pub async fn set_segment_info(
@@ -253,7 +250,7 @@ impl Database {
         &self,
         limit: u32,
     ) -> impl Stream<Item = anyhow::Result<LeastAccessedSegment>> {
-        let records = sqlx::query!(
+        sqlx::query!(
             "SELECT s.imdb, s.server, s.size, s.segment, s.start_time
 FROM segments s
 INNER JOIN movies m ON s.imdb = m.imdb AND s.server = m.server
@@ -274,9 +271,39 @@ LIMIT ?;",
                 start_time: row.start_time,
             },
         })
-        .map_err(anyhow::Error::from);
+        .map_err(anyhow::Error::from)
+    }
 
-        records
+    pub(crate) async fn delete_movie_segment_data(
+        &self,
+        imdb: Imdb,
+        server: &str,
+    ) -> anyhow::Result<()> {
+        sqlx::query!(
+            "DELETE FROM segments WHERE imdb=? AND server=?",
+            imdb.to_u64() as i64,
+            server
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query!(
+            "DELETE FROM subtitles WHERE imdb=? AND server=?",
+            imdb.to_u64() as i64,
+            server
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query!(
+            "DELETE FROM movies WHERE imdb=? AND server=?",
+            imdb.to_u64() as i64,
+            server
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 }
 
@@ -293,7 +320,16 @@ struct DeleteFileOnDrop {
 
 impl DeleteFileOnDrop {
     async fn move_to(mut self, new_path: impl AsRef<Path>) -> std::io::Result<()> {
-        tokio::fs::rename(&self.path, new_path).await?;
+        let new_path = new_path.as_ref();
+        let mut r = tokio::fs::rename(&self.path, new_path).await;
+        if let Err(e) = &r
+            && e.kind() == std::io::ErrorKind::NotFound
+            && let Some(parent) = new_path.parent()
+        {
+            tokio::fs::create_dir_all(parent).await?;
+            r = tokio::fs::rename(&self.path, new_path).await;
+        }
+        r?;
         self.delete_on_drop = false;
         Ok(())
     }
@@ -312,11 +348,13 @@ pub struct SegmentsContent<S> {
     pub len: u64,
 }
 
-pub struct NewLocalPlayerOptions<'a> {
+pub struct NewLocalPlayerOptions {
     pub cache_directory: PathBuf,
     pub max_total_file_size: u64,
-    pub metadata_memory_cache_size: u64,
-    pub time_cache_options: TimeCacheOptions<'a>,
+    pub metadata_cache_size: u64,
+    pub metadata_cache_time_to_live: Duration,
+    pub metadata_cache_time_to_idle: Duration,
+    pub time_cache_options: TimeCacheOptions,
 }
 
 struct CounterWritter {
@@ -374,8 +412,6 @@ impl LocalPlayer {
                     },
                     segment_index: end,
                 },
-                // TODO: 20 minutes is harcoded. We should make this configurable
-                time_remaining: 20. * 60.,
             })
             .unwrap();
         // TODO: remove this log
@@ -408,6 +444,8 @@ pub struct LocalPlayerInner {
     total_file_size: Arc<std::sync::atomic::AtomicU64>,
     cleanup_in_progress: Arc<std::sync::atomic::AtomicBool>,
     max_total_file_size: u64,
+
+    pub(super) cache_in_the_future: std::time::Duration,
 }
 
 impl LocalPlayer {
@@ -417,18 +455,23 @@ impl LocalPlayer {
         NewLocalPlayerOptions {
             cache_directory,
             max_total_file_size,
-            metadata_memory_cache_size,
+            metadata_cache_size,
+            metadata_cache_time_to_idle,
+            metadata_cache_time_to_live,
             time_cache_options,
-        }: NewLocalPlayerOptions<'_>,
+        }: NewLocalPlayerOptions,
     ) -> anyhow::Result<Self> {
         tokio::fs::create_dir_all(&cache_directory).await?;
         tokio::fs::create_dir_all(&cache_directory.join("tmp")).await?;
         let db = Database::new(&cache_directory.join("metadata.sql")).await?;
+        cleanup_cache_folder(&cache_directory).await?;
         let total_file_size = dbg!(db.get_total_size().await?);
 
         let time_cache = TimeCache::new(db.clone(), time_cache_options).await?;
-        let m3u8_master_files = moka::future::CacheBuilder::new(metadata_memory_cache_size)
+        let m3u8_master_files = moka::future::CacheBuilder::new(metadata_cache_size)
             .weigher(weigher)
+            .time_to_live(metadata_cache_time_to_live)
+            .time_to_idle(metadata_cache_time_to_idle)
             .build();
         let inner = LocalPlayerInner {
             client,
@@ -441,6 +484,7 @@ impl LocalPlayer {
             total_file_size: Arc::new(AtomicU64::new(total_file_size)),
             cache_directory: cache_directory.into(),
             m3u8_master_files,
+            cache_in_the_future: std::time::Duration::from_secs(15 * 60),
         };
         inner.check_and_start_cleanup_if_needed(0);
         let inner = Arc::new(inner);
@@ -457,7 +501,7 @@ impl LocalPlayer {
 }
 
 impl LocalPlayerInner {
-    fn directory_movie_file_path(
+    pub(crate) fn directory_movie_file_path(
         segments_directory: &std::path::Path,
         imdb: Imdb,
         server: &str,
@@ -544,10 +588,6 @@ impl LocalPlayerInner {
                     Ok((stream, len))
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    if let Some(parent) = path.parent() {
-                        tracing::info!("Creating directory {}", parent.display());
-                        tokio::fs::create_dir_all(parent).await?;
-                    }
                     let segment_id = SegmentId {
                         m3u8: M3U8CacheKey {
                             imdb,
@@ -754,6 +794,7 @@ impl LocalPlayerInner {
         client: &reqwest::Client,
         m3u8_key: &M3U8CacheKey,
         db: &Database,
+        time_cache: &TimeCache,
     ) -> anyhow::Result<Arc<MediaPlaylist>> {
         let r = m3u8_master_files
             .try_get_with_by_ref(m3u8_key, async {
@@ -806,14 +847,21 @@ impl LocalPlayerInner {
                 let playlist = m3u8_rs::parse_media_playlist_res(&playlist_data)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-                // TODO: add a check here. If the metadata changed, this means we should remove all the segments data
-                // TODO: we can also check at the beginning if we have all the segments. If we do, we can skip the request to fsonline
-                db.set_playlist_metadata(
-                    m3u8_key.imdb,
-                    &m3u8_key.server_name,
-                    &PlaylistInfoMetadata::from_playlist(&playlist),
-                )
-                .await?;
+                let old_metadata = db
+                    .get_playlist_metadata(m3u8_key.imdb, &m3u8_key.server_name)
+                    .await?;
+                let new_metadata = PlaylistInfoMetadata::from_playlist(&playlist);
+                if let Some(old_metadata) = old_metadata
+                    && (old_metadata.total_segments != new_metadata.total_segments
+                        || (old_metadata.movie_duration - new_metadata.movie_duration).abs() > 0.1)
+                {
+                    tracing::warn!("Deleting the full movie for {m3u8_key:?}. Metadata mismatch");
+                    time_cache.delete_full_movie(m3u8_key, new_metadata).await?;
+                } else {
+                    // TODO: we can also check at the beginning if we have all the segments. If we do, we can skip the request to fsonline
+                    db.set_playlist_metadata(m3u8_key.imdb, &m3u8_key.server_name, &new_metadata)
+                        .await?;
+                }
 
                 anyhow::Ok(Arc::new(playlist))
             })
@@ -847,32 +895,41 @@ impl LocalPlayerInner {
             .lock_mutex((m3u8_key.clone(), 0))
             .await;
 
-        let mut one_segment_times = self
+        let one_segment_times = self
             .time_cache
             .get_or_fetch(m3u8_key, &playlist, with_timeout)
             .await?;
 
         let mut segments = Vec::new();
-
-        if !one_segment_times.iter().any(|s| s.segment_index == 0) {
+        let one_segment_times_first_element = if !one_segment_times
+            .first()
+            .is_some_and(|s| s.segment_index == 0)
+        {
             tracing::error!(
                 "There was an error and we didn't received the first segment time. Assuming to be 0"
             );
-            one_segment_times.push(OneSegmentTime {
+            Some(OneSegmentTime {
                 segment_index: 0,
                 start_time: 0.,
-            });
-        }
+            })
+        } else {
+            None
+        };
 
-        for i in 0..one_segment_times.len() - 1 {
+        let one_segment_times_iter = one_segment_times_first_element
+            .into_iter()
+            .chain(one_segment_times.iter().copied());
+        for (prev, current) in one_segment_times_iter.tuple_windows() {
             let segment = SegmentsTime {
-                duration: one_segment_times[i + 1].start_time - one_segment_times[i].start_time,
-                segments_range: one_segment_times[i].segment_index
-                    ..one_segment_times[i + 1].segment_index,
+                duration: current.start_time - prev.start_time,
+                segments_range: prev.segment_index..current.segment_index,
             };
             segments.push(segment);
         }
-        let last_segment = one_segment_times.last().unwrap();
+        let last_segment = one_segment_times.last().unwrap_or(&OneSegmentTime {
+            segment_index: 0,
+            start_time: 0.,
+        });
         segments.push(SegmentsTime {
             segments_range: last_segment.segment_index..segments_len,
             duration: movie_duration - last_segment.start_time,
@@ -888,6 +945,7 @@ impl LocalPlayerInner {
             &self.client,
             m3u8_key,
             &self.db,
+            &self.time_cache,
         )
         .await
     }
@@ -913,9 +971,10 @@ impl LocalPlayerInner {
     }
 
     #[cfg(windows)]
-    async fn delete_file(path: impl AsRef<Path>) -> anyhow::Result<()> {
+    pub(crate) async fn delete_file(path: impl AsRef<Path>) -> anyhow::Result<()> {
         const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x04000000;
         tokio::fs::File::options()
+            .read(true)
             .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
             .open(path)
             .await?;
@@ -923,7 +982,7 @@ impl LocalPlayerInner {
     }
 
     #[cfg(unix)]
-    async fn delete_file(path: impl AsRef<Path>) -> anyhow::Result<()> {
+    pub(crate) async fn delete_file(path: impl AsRef<Path>) -> anyhow::Result<()> {
         tokio::fs::remove_file(path).await?;
         Ok(())
     }
@@ -944,22 +1003,23 @@ impl LocalPlayerInner {
         std::fs::remove_file(path)?;
         Ok(())
     }
+}
 
-    async fn delete_full_movie(&self, m3u8_key: &M3U8CacheKey) -> anyhow::Result<()> {
-        let directory = Self::directory_movie_file_path(
-            &self.cache_directory,
-            m3u8_key.imdb,
-            &m3u8_key.server_name,
-        );
-        let mut directory_content = tokio::fs::read_dir(&directory).await?;
-        while let Some(file) = directory_content.next_entry().await? {
+async fn cleanup_cache_folder(cache_directory: &Path) -> anyhow::Result<()> {
+    let mut tmp_files = tokio::fs::read_dir(cache_directory.join("tmp")).await?;
+    while let Some(file) = tmp_files.next_entry().await? {
+        let file_type = file.file_type().await?;
+        if file_type.is_file() {
             let path = file.path();
-            Self::delete_file(path).await?;
+            tokio::spawn(async move {
+                tokio::fs::remove_file(path).await.ok();
+            });
+        } else {
+            tracing::error!(
+                "got a non file in the tmp folder: {}",
+                file.path().display()
+            );
         }
-        // TODO: also delete from the database. Make sure nothing is added to this movie while we delete the full movie
-        // We need some mutex for this
-        Ok(())
     }
-
-    pub async fn close(&self) {}
+    Ok(())
 }

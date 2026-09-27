@@ -1,20 +1,18 @@
-use std::{collections::BTreeMap, convert::Infallible, path::Path, sync::Arc, time::Duration};
+use std::{borrow::Cow, ops::Deref, path::PathBuf, sync::Arc, time::Duration};
 
-use foyer::{
-    BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder,
-    HybridCachePolicy, RecoverMode,
-};
-use futures::{StreamExt, TryStreamExt, future::join_all};
+use futures::TryStreamExt;
 use m3u8_rs::MediaPlaylist;
-use moka::ops::compute::{CompResult, Op};
+use moka::ops::compute::Op;
 use mpeg2ts_reader::packet::Packet;
+use tokio::task::JoinSet;
 
 use crate::{
     service::{
-        SegmentInfo,
+        PlaylistInfoMetadata, SegmentInfo,
         local_m3u8_player::{
-            M3U8CacheKey, OneSegmentTime, SegmentId, intervals::Interval,
-            segments_database::Database,
+            M3U8CacheKey, OneSegmentTime, SegmentId,
+            intervals::Interval,
+            segments_database::{Database, LocalPlayerInner},
         },
     },
     ts_parser,
@@ -29,26 +27,31 @@ enum GetSegmentTimeError {
     Other(#[from] anyhow::Error),
 }
 
-pub struct TimeCacheOptions<'a> {
+pub struct TimeCacheOptions {
     pub(crate) smaller_time_between_segments: f32,
     pub(crate) bigger_time_between_segments: f32,
-    pub(crate) cache_size_file_mb: usize,
     pub(crate) cache_size_memory_mb: usize,
-    pub(crate) cache_path: &'a Path,
     pub(crate) timeout_fast_time: Duration,
     pub(crate) client: reqwest::Client,
+    pub(crate) cache_directory: PathBuf,
+}
+
+#[derive(Clone)]
+struct SegmentTimeCacheValue {
+    segments_time: Arc<[OneSegmentTime]>,
+    movie_duration: f32,
+    total_segments_count: usize,
 }
 
 #[derive(Clone)]
 pub struct TimeCache {
-    // TODO: we should also save the movie duration and segments count. In case the response changes
-    // TODO: change Vec to Arc<[]>
-    segments_time_cache_moka: moka::future::Cache<M3U8CacheKey, Vec<OneSegmentTime>>,
-    mutexes: MultipleValueMutex<M3U8CacheKey>,
+    mutexes_get_or_fetch: MultipleValueMutex<M3U8CacheKey>,
+    segments_time_cache_moka: moka::future::Cache<M3U8CacheKey, SegmentTimeCacheValue>,
     smaller_time_between_segments: f32,
     bigger_time_between_segments: f32,
     timeout_fast_time: Duration,
     client: reqwest::Client,
+    cache_directory: PathBuf,
     db: Database,
 }
 
@@ -59,29 +62,29 @@ impl TimeCache {
             bigger_time_between_segments,
             smaller_time_between_segments,
             timeout_fast_time,
-            cache_size_file_mb,
             cache_size_memory_mb,
-            cache_path,
             client,
-        }: TimeCacheOptions<'_>,
+            cache_directory,
+        }: TimeCacheOptions,
     ) -> anyhow::Result<Self> {
         assert!(
             smaller_time_between_segments <= bigger_time_between_segments,
             "Invalid arguments"
         );
 
-        let segments_time_cache_moka = moka::future::CacheBuilder::<
-            M3U8CacheKey,
-            Vec<OneSegmentTime>,
-            _,
-        >::new(1024 * 1024 * cache_size_memory_mb as u64)
-        .weigher(|key, v| {
-            (key.size() + size_of_val(v) + v.len() * (size_of::<usize>() + size_of::<f32>())) as u32
-        })
-        .build();
+        let segments_time_cache_moka =
+            moka::future::CacheBuilder::<M3U8CacheKey, SegmentTimeCacheValue, _>::new(
+                1024 * 1024 * cache_size_memory_mb as u64,
+            )
+            .weigher(|key, v| {
+                (key.size() + size_of_val(v) + v.segments_time.len() * size_of::<OneSegmentTime>())
+                    as u32
+            })
+            .build();
 
         Ok(Self {
-            mutexes: MultipleValueMutex::new(),
+            mutexes_get_or_fetch: MultipleValueMutex::new(),
+            cache_directory,
             smaller_time_between_segments,
             bigger_time_between_segments,
             timeout_fast_time,
@@ -199,18 +202,20 @@ impl TimeCache {
     }
 
     pub(super) async fn insert(&self, id: &SegmentId, content: &bytes::Bytes) {
-        let _guard = self.mutexes.lock_mutex(id.m3u8.clone()).await;
         self.segments_time_cache_moka
             .entry_by_ref(&id.m3u8)
             .and_compute_with(async |entry| {
-                let mut old = match entry {
+                let old = match entry {
                     None => {
                         return Op::Nop;
                     }
                     Some(entry) => entry.into_value(),
                 };
 
-                let index = match old.binary_search_by_key(&id.segment_index, |x| x.segment_index) {
+                let index = match old
+                    .segments_time
+                    .binary_search_by_key(&id.segment_index, |x| x.segment_index)
+                {
                     Ok(_) => {
                         return Op::Nop;
                     }
@@ -222,15 +227,22 @@ impl TimeCache {
                     tracing::warn!("Received packet for {id:?}, but we failed to parse it");
                     return Op::Nop;
                 };
-
-                old.insert(
-                    index,
-                    OneSegmentTime {
+                let new_segments = old.segments_time[..index]
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(OneSegmentTime {
                         segment_index: id.segment_index,
                         start_time: time,
-                    },
-                );
-                Op::Put(old)
+                    }))
+                    .chain(old.segments_time[index..].iter().cloned())
+                    .collect::<Vec<_>>();
+                let new_value = SegmentTimeCacheValue {
+                    segments_time: Arc::from(new_segments),
+                    movie_duration: old.movie_duration,
+                    total_segments_count: old.total_segments_count,
+                };
+
+                Op::Put(new_value)
             })
             .await;
     }
@@ -239,8 +251,9 @@ impl TimeCache {
         &self,
         m3u8: &M3U8CacheKey,
         original_media_playlist: &MediaPlaylist,
+        time_between_segments: f32,
         deadline_on: Option<tokio::time::Instant>,
-    ) -> anyhow::Result<Vec<OneSegmentTime>> {
+    ) -> anyhow::Result<(Arc<[OneSegmentTime]>, bool)> {
         let movie_duration: f32 = original_media_playlist
             .segments
             .iter()
@@ -248,99 +261,58 @@ impl TimeCache {
             .sum();
         let segments_len = original_media_playlist.segments.len();
 
-        let guard = self.mutexes.lock_mutex(m3u8.clone()).await;
-        let response = self
-            .segments_time_cache_moka
-            .try_get_with_by_ref(m3u8, async {
-                tracing::info!("Computed all segment times");
-                // TODO: extract into a function this inner methods
-                // TODO: we should also get the movie segments count and duration. To check them against the original media playlist
-                let mut times = get_all_times_new(&self.db, &m3u8).await?;
-                tracing::info!("Done computing all segment times");
-
-                dbg!(&times, segments_len);
-                let mut intervals =
-                    Interval::new(segments_len, movie_duration, times.iter().cloned());
-
-                let mut something_changed = false;
-                while let Some(next_interval) = intervals.next_best_to_split() {
-                    let duration = next_interval.item().duration();
-                    if duration < self.bigger_time_between_segments {
-                        tracing::info!("Duration is {}. Stopping", duration);
-                        break;
-                    }
-
-                    let index = next_interval.index();
-                    // TODO: remove this log
-                    tracing::info!("Received new index {index}");
-
-                    let r = self
-                        .get_segment_time(&original_media_playlist.segments[index].uri, None)
-                        .await;
-
-                    match r {
-                        Ok(start_time) => {
-                            let segment_time = OneSegmentTime {
-                                segment_index: index,
-                                start_time,
-                            };
-                            times.push(segment_time);
-                            next_interval.split(segment_time.start_time);
-                            something_changed = true;
-                            self.db
-                                .set_segment_info(
-                                    m3u8.imdb,
-                                    &m3u8.server_name,
-                                    &SegmentInfo {
-                                        segment_index: index,
-                                        size: 0,
-                                        start_time: Some(start_time as f64),
-                                    },
-                                    false,
-                                )
-                                .await?;
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "Failed to get segment timestamp for index {index}: {e:?}"
-                            );
-                            next_interval.remove();
-                        }
-                    }
-                }
-
-                if something_changed {
-                    times.sort_by_key(|t| t.segment_index);
-                }
-                anyhow::Ok(times)
-            })
-            .await
-            .map_err(|e| match Arc::try_unwrap(e) {
-                Ok(e) => e,
-                Err(e) => anyhow::anyhow!("{e:?}"),
-            })?;
-        drop(guard);
-        if deadline_on.is_some_and(|d| d < tokio::time::Instant::now()) {
-            return Ok(response);
-        }
-
+        let mut finished_computing = false;
         let r = self
             .segments_time_cache_moka
             .entry_by_ref(m3u8)
-            .and_compute_with(async |entry| {
-                let mut something_changed = entry.is_none();
-                let mut times = entry.map_or_else(|| response, |entry| entry.into_value());
+            .and_try_compute_with(async |entry| {
+                let mut something_changed = false;
+                let result = match entry {
+                    None => {
+                        something_changed = true;
+                        let times = get_all_times_new(&self.db, m3u8).await?;
+                        let metadata = self
+                            .db
+                            .get_playlist_metadata(m3u8.imdb, &m3u8.server_name)
+                            .await?
+                            .unwrap_or_else(|| {
+                                tracing::warn!("No metadata found for {m3u8:?}. We will asume the one from the original media playlist");
+                                PlaylistInfoMetadata {
+                                movie_duration: movie_duration as f64,
+                                total_segments: segments_len,
+                            }});
 
-                dbg!(&times, segments_len);
+                        SegmentTimeCacheValue { segments_time: times.into(), movie_duration: metadata.movie_duration as f32, total_segments_count: metadata.total_segments }
+                    }
+                    Some(entry) => {
+                        entry.into_value()
+                    }
+                };
+                let mut times = Cow::Borrowed(result.segments_time.deref());
+                if (result.movie_duration- movie_duration ).abs() > 0.1
+                    || result.total_segments_count != segments_len
+                {
+                    tracing::warn!("The movie duration or total segments count changed for {m3u8:?}. We should recompute all segment times");
+                    times = Cow::Owned(Vec::new());
+                    something_changed = true;
+                    self.delete_full_movie(m3u8, PlaylistInfoMetadata { movie_duration: movie_duration as f64, total_segments: segments_len }).await?;
+                }
 
-                let mut intervals =
-                    Interval::new(segments_len, movie_duration, times.iter().cloned());
+                tracing::info!("Done computing all segment times");
 
+                let mut intervals = Interval::new(
+                    segments_len,
+                    movie_duration,
+                    times.iter().cloned(),
+                );
+                finished_computing= intervals.next_best_to_split().is_none();
                 while let Some(next_interval) = intervals.next_best_to_split()
-                    && deadline_on.is_some_and(|d| d < tokio::time::Instant::now())
+                    && deadline_on.is_none_or(|d| d > tokio::time::Instant::now())
                 {
                     let duration = next_interval.item().duration();
-                    if duration < self.bigger_time_between_segments {
+                    if duration < time_between_segments {
+                        tracing::info!("Finished computing");
+                        finished_computing = true;
                         break;
                     }
 
@@ -356,7 +328,7 @@ impl TimeCache {
                                 segment_index: index,
                                 start_time,
                             };
-                            times.push(segment_time);
+                            times.to_mut().push(segment_time);
                             next_interval.split(segment_time.start_time);
                             something_changed = true;
                             if let Err(e) = self
@@ -388,14 +360,19 @@ impl TimeCache {
                 }
 
                 if something_changed {
-                    times.sort_by_key(|t| t.segment_index);
-                    Op::Put(times)
+                    times.to_mut().sort_by_key(|t| t.segment_index);
+                    anyhow::Ok( Op::Put(SegmentTimeCacheValue {
+                        segments_time: Arc::from(times.into_owned()),
+                        movie_duration,
+                        total_segments_count: segments_len,
+                    }))
                 } else {
-                    Op::Nop
+                    anyhow::Ok(Op::Nop)
                 }
             })
             .await;
-        Ok(r.unwrap().into_value())
+
+        Ok((r?.unwrap().into_value().segments_time, finished_computing))
     }
 
     pub(super) async fn get_or_fetch(
@@ -403,30 +380,80 @@ impl TimeCache {
         m3u8: &M3U8CacheKey,
         original_media_playlist: &MediaPlaylist,
         fast_response: bool,
-    ) -> anyhow::Result<Vec<OneSegmentTime>> {
-        let deadline_on = fast_response
-            .then_some(Some(tokio::time::Instant::now() + self.timeout_fast_time))
-            .flatten();
-        let segments = self
-            .get_inner(m3u8, original_media_playlist, deadline_on)
-            .await?;
-        Ok(segments)
+    ) -> anyhow::Result<Arc<[OneSegmentTime]>> {
+        if fast_response {
+            let deadline_on = tokio::time::Instant::now() + self.timeout_fast_time;
+            // This guard is usefull so we don't end up waiting more than intended. If another requests come between the 2 get_inner requests.
+            let _guard = self.mutexes_get_or_fetch.lock_mutex(m3u8.clone()).await;
+            let (mut segments, _) = self
+                .get_inner(
+                    m3u8,
+                    original_media_playlist,
+                    self.bigger_time_between_segments,
+                    None,
+                )
+                .await?;
+
+            if deadline_on < tokio::time::Instant::now() {
+                (segments, _) = self
+                    .get_inner(
+                        m3u8,
+                        original_media_playlist,
+                        self.smaller_time_between_segments,
+                        Some(deadline_on),
+                    )
+                    .await?;
+            }
+            Ok(segments)
+        } else {
+            let mut counter = 0;
+            loop {
+                let deadline_on = tokio::time::Instant::now() + self.timeout_fast_time;
+                let _guard = self.mutexes_get_or_fetch.lock_mutex(m3u8.clone()).await;
+                let (segments, finished) = self
+                    .get_inner(
+                        m3u8,
+                        original_media_playlist,
+                        self.smaller_time_between_segments,
+                        Some(deadline_on),
+                    )
+                    .await?;
+                if finished || counter > 10 {
+                    break Ok(segments);
+                }
+                counter += 1;
+            }
+        }
     }
 
-    // TODO: this is not needed. The last acces time should not be updated from here
-    // pub(super) async fn close(&self) -> anyhow::Result<()> {
-    // self.segments_time_cache_moka.invalidate_all();
-    // self.segments_time_cache_moka.run_pending_tasks().await;
-    // }
-}
-
-async fn get_time(
-    segment_data: &HybridCache<SegmentId, bytes::Bytes>,
-    id: &SegmentId,
-) -> Option<f32> {
-    let r = segment_data.get(id).await.ok()??;
-    let time = ts_parser::TsTimeParser::new(true).parse_and_return_start_time(r.value().clone())?;
-    Some(time)
+    pub(crate) async fn delete_full_movie(
+        &self,
+        m3u8_key: &M3U8CacheKey,
+        new_metadata: PlaylistInfoMetadata,
+    ) -> anyhow::Result<()> {
+        let directory = LocalPlayerInner::directory_movie_file_path(
+            &self.cache_directory,
+            m3u8_key.imdb,
+            &m3u8_key.server_name,
+        );
+        let mut directory_content = tokio::fs::read_dir(&directory).await?;
+        let mut s = JoinSet::new();
+        while let Some(file) = directory_content.next_entry().await? {
+            let path = file.path();
+            s.spawn(LocalPlayerInner::delete_file(path));
+        }
+        while let Some(res) = s.join_next().await {
+            res??;
+        }
+        drop(s);
+        self.db
+            .delete_movie_segment_data(m3u8_key.imdb, &m3u8_key.server_name)
+            .await?;
+        self.db
+            .set_playlist_metadata(m3u8_key.imdb, &m3u8_key.server_name, &new_metadata)
+            .await?;
+        Ok(())
+    }
 }
 
 async fn get_all_times_new(
@@ -443,5 +470,6 @@ async fn get_all_times_new(
         })
         .try_collect()
         .await?;
+
     Ok(r)
 }

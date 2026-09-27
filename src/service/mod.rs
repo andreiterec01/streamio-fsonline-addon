@@ -36,11 +36,6 @@ impl PlaylistInfoMetadata {
     }
 }
 
-pub struct PlaylistInfo {
-    pub metadata: PlaylistInfoMetadata,
-    pub segments: Vec<SegmentInfo>,
-}
-
 pub struct SegmentInfo {
     pub segment_index: usize,
     pub size: u64,

@@ -16,7 +16,6 @@ chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive", "env"] }
 dashmap = "6.2.1"
 dotenvy = "0.15.7"
-foyer = { version = "0.22.3", features = ["serde"] }
 futures = "0.3.32"
 hyper = "1.10.1"
 itertools = "0.15.0"
@@ -26,11 +25,11 @@ moka = { version = "0.12.15", features = ["future"] }
 mpeg2ts-reader = "0.18.2"
 mut-binary-heap = "0.1.0"
 regex = "1.12.4"
-reqwest = { version = "0.13.4", features = ["form", "gzip", "json", "stream"] }
+reqwest = { version = "0.13", features = ["form", "gzip", "json", "stream"] }
 scraper = "0.27.0"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
-thiserror = "2.0.18"
+thiserror = "2.0"
 time = { version = "0.3.49", features = ["macros"] }
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-util = { version = "0.7.18", features = ["codec"] }
@@ -43,4 +42,4 @@ tracing-subscriber = { version = "0.3.23", features = [
     "local-time",
     "time",
 ] }
-uuid = { version = "1.23.2", features = ["serde", "v4"] }
+uuid = { version = "1.26", features = ["serde", "v4"] }

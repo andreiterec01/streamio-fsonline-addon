@@ -1,6 +1,5 @@
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -19,10 +18,7 @@ use crate::{
         ImdbToVideoServer,
         fsonline_service::VideoServer,
         imdb_service::ImdbService,
-        local_m3u8_player::{
-            self,
-            segments_database::{LocalPlayer, LocalPlayerInner},
-        },
+        local_m3u8_player::{self, segments_database::LocalPlayer},
         scrappers::{PlayerScrappers, file_sun::FileSuN, vidmoly::VidmolyScrapper},
     },
 };
@@ -91,20 +87,19 @@ async fn main() -> anyhow::Result<()> {
 
     let time_cache_options = local_m3u8_player::time_cache_db::TimeCacheOptions {
         client: client.clone(),
-        // TODO: make this configurable
-        cache_path: std::path::Path::new("./cache-new-timestamp"),
-        cache_size_file_mb: 1024,
-        cache_size_memory_mb: 200,
+        cache_directory: args.cache_path.clone(),
+        cache_size_memory_mb: args.time_cache_size_mb,
         bigger_time_between_segments: args.max_segment_duration,
         smaller_time_between_segments: args.target_segment_duration,
         timeout_fast_time: Duration::from_secs(args.timeout_waiting_for_playlist_sec),
     };
     let local_player_config =
         crate::service::local_m3u8_player::segments_database::NewLocalPlayerOptions {
-            cache_directory: "movies".into(),
-            // TODO: make this 5GB configurable and 5 MB configurable
-            max_total_file_size: 1024 * 1024 * 1024 * 5,
-            metadata_memory_cache_size: 5 * 1024 * 1024,
+            cache_directory: args.cache_path,
+            max_total_file_size: 1024 * 1024 * args.file_segments_cache_size_mb,
+            metadata_cache_size: args.master_cache_size_mb * 1024 * 1024,
+            metadata_cache_time_to_live: Duration::from_secs(args.metadata_cache_time_to_live),
+            metadata_cache_time_to_idle: Duration::from_secs(args.metadata_cache_time_to_idle),
             time_cache_options,
         };
 
@@ -128,11 +123,6 @@ async fn main() -> anyhow::Result<()> {
         .allow_methods(tower_http::cors::Any);
     let router = routes::routes()
         .route("/install", axum::routing::get(install_ui))
-        // .nest_service(
-        //     "/frontend",
-        //     ServeDir::new(r"../client/build")
-        //         .fallback(ServeFile::new(r"../client/build/index.html")),
-        // )
         .layer(
             ServiceBuilder::new()
                 .layer(axum::middleware::from_fn(mw::log_request_response))
@@ -169,8 +159,6 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::warn!("Received signal. Waiting for graceful shutdown");
     let r = server.await;
-    // TODO: we should stop the cache before
-    local_player.inner.close().await;
     r??;
     Ok(())
 }

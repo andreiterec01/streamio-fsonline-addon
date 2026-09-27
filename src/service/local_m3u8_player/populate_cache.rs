@@ -14,12 +14,12 @@ use crate::{
 #[derive(Clone)]
 struct NextCompute {
     not_computed_index: Option<usize>,
-    duration_from_start_to_not_computed_index: f64,
+    duration_from_start_to_not_computed_index: Duration,
 }
 
 struct NextResult {
     next_index: usize,
-    time_taken: f64,
+    time_taken: Duration,
 }
 
 struct MovieData {
@@ -48,7 +48,7 @@ impl MovieData {
         let Some(newest) = self.get_next_compute_inner(index) else {
             return Some(NextResult {
                 next_index: index,
-                time_taken: 0.,
+                time_taken: Duration::from_secs(0),
             });
         };
 
@@ -58,7 +58,7 @@ impl MovieData {
         })
     }
 
-    fn insert(&mut self, index: usize, duration: f64) {
+    fn insert(&mut self, index: usize, duration: Duration) {
         self.next_compute.insert(
             index,
             NextCompute {
@@ -71,7 +71,6 @@ impl MovieData {
 
 pub struct LoadCacheRequest {
     pub(crate) segment_id: SegmentId,
-    pub(crate) time_remaining: f64,
 }
 
 impl LocalPlayerInner {
@@ -79,48 +78,24 @@ impl LocalPlayerInner {
         self: Arc<Self>,
         mut requests: tokio::sync::mpsc::UnboundedReceiver<LoadCacheRequest>,
     ) {
-        #[derive(PartialEq, PartialOrd)]
-        struct F64Total(f64);
-        impl Eq for F64Total {}
-        impl Ord for F64Total {
-            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-                self.0.total_cmp(&other.0)
-            }
-        }
-
-        let mut heap = mut_binary_heap::BinaryHeap::<SegmentId, F64Total, MaxComparator>::new();
+        let mut heap = mut_binary_heap::BinaryHeap::<SegmentId, Duration, MaxComparator>::new();
 
         let mut mini =
             small_cache::SmallCache::<M3U8CacheKey, MovieData>::new(Duration::from_secs(15 * 60));
         loop {
-            while let Some(LoadCacheRequest {
-                segment_id,
-                time_remaining,
-            }) = requests.try_recv().ok()
-            {
-                heap.push(segment_id, F64Total(time_remaining));
+            while let Ok(LoadCacheRequest { segment_id }) = requests.try_recv() {
+                heap.push(segment_id, self.cache_in_the_future);
             }
-            let item = if let Some((segment_id, F64Total(time_remaining))) = heap.pop_with_key() {
-                LoadCacheRequest {
-                    segment_id,
-                    time_remaining,
-                }
-            } else {
-                let Some(value) = requests.recv().await else {
-                    return;
+            let (mut segment_id, mut time_remaining) =
+                if let Some((segment_id, time_remaining)) = heap.pop_with_key() {
+                    (segment_id, time_remaining)
+                } else {
+                    let Some(LoadCacheRequest { segment_id }) = requests.recv().await else {
+                        return;
+                    };
+                    (segment_id, self.cache_in_the_future)
                 };
-                value
-            };
-            let LoadCacheRequest {
-                mut segment_id,
-                mut time_remaining,
-            } = item;
-            // TODO: remove this log
-            tracing::info!(
-                "Loading cache for segment: {:?}, time_remaining: {}",
-                segment_id,
-                time_remaining
-            );
+
             // TODO: remove this unwrap
             let segments_count = self
                 .get_m3u8(&segment_id.m3u8)
@@ -138,13 +113,13 @@ impl LocalPlayerInner {
                 continue;
             };
             tracing::info!(
-                "Next compute for segment: {:?}, next_index: {}, time_taken: {}",
+                "Next compute for segment: {:?}, next_index: {}, time_taken: {:.2}",
                 segment_id,
                 compute_next.next_index,
-                compute_next.time_taken
+                compute_next.time_taken.as_secs_f64()
             );
-            time_remaining -= compute_next.time_taken;
-            if time_remaining <= 0. {
+            time_remaining = time_remaining.saturating_sub(compute_next.time_taken);
+            if time_remaining.is_zero() {
                 continue;
             }
             let mut stream = match self
@@ -173,14 +148,15 @@ impl LocalPlayerInner {
                     // default of 10 seconds for each segment
                     10.
                 } as f64;
+            let duration = Duration::from_secs_f64(duration);
             times.insert(compute_next.next_index, duration);
-            time_remaining -= duration;
-            if time_remaining <= 0. {
+            time_remaining = time_remaining.saturating_sub(duration);
+            if time_remaining.is_zero() {
                 continue;
             }
             segment_id.segment_index = compute_next.next_index;
 
-            heap.push(segment_id, F64Total(time_remaining));
+            heap.push(segment_id, time_remaining);
         }
     }
 }

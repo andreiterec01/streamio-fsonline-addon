@@ -1,6 +1,6 @@
 use anyhow::Context;
 use axum::{
-    Form, Json, Router,
+    Json, Router,
     extract::{Path, State},
 };
 use axum_extra::TypedHeader;
@@ -10,16 +10,13 @@ use tower_http::services::ServeFile;
 
 use crate::{
     AppState, UsesHttps,
-    contracts::{Imdb, MovieKey, OptionsBytes, PlayerData, Subtitle},
+    contracts::{Imdb, OptionsBytes, Subtitle},
     custom_extractor::axum_range::Ranged,
     error::WebResult,
     service::{
         ImdbToVideoServer,
-        fsonline_service::{SubtitleFsonline, VideoServer},
-        local_m3u8_player::{
-            M3U8CacheKey,
-            segments_database::{LocalPlayer, LocalPlayerInner},
-        },
+        fsonline_service::SubtitleFsonline,
+        local_m3u8_player::{M3U8CacheKey, segments_database::LocalPlayer},
     },
 };
 pub mod m3u8_routes;
@@ -27,7 +24,6 @@ pub fn routes() -> Router<AppState> {
     use axum::routing::*;
     Router::new()
         .route_service("/{options}/manifest.json", ServeFile::new(r"manifest.json"))
-        .route("/v1/api/season", get(get_movie_url))
         .route("/{options}/stream/series/{imdb_id}", get(series))
         .route("/{options}/stream/movie/{imdb_id}", get(series))
         .route(
@@ -48,15 +44,6 @@ pub fn routes() -> Router<AppState> {
 pub async fn install_ui() -> axum::response::Html<&'static str> {
     let html_code = include_str!("../../index.html");
     axum::response::Html(html_code)
-}
-
-#[axum::debug_handler]
-async fn get_movie_url(
-    State(movie): State<VideoServer>,
-    Form(series): Form<MovieKey>,
-) -> WebResult<Json<Arc<[PlayerData]>>> {
-    let r = movie.get(&series).await?.players;
-    Ok(Json(r))
 }
 
 #[derive(Serialize)]

@@ -17,24 +17,25 @@ impl<K: Eq + Hash + Clone, V> SmallCache<K, V> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn get_mut(&mut self, k: &K) -> Option<&mut V> {
+        let now = std::time::Instant::now();
         if let Some(mut v) = self.expiration.get_mut(k) {
-            let expire_at = std::time::Instant::now() + self.time_to_idle;
+            let expire_at = now + self.time_to_idle;
             *v = expire_at;
         }
-        self.cleanup();
+        self.cleanup(now);
         self.cache.get_mut(k)
     }
 
     pub(crate) fn get_or_insert_mut(&mut self, k: K, value: impl FnOnce() -> V) -> &mut V {
-        self.expiration
-            .push(k.clone(), std::time::Instant::now() + self.time_to_idle);
-        self.cleanup();
+        let now = std::time::Instant::now();
+        self.expiration.push(k.clone(), now + self.time_to_idle);
+        self.cleanup(now);
         self.cache.entry(k).or_insert_with(value)
     }
 
-    fn cleanup(&mut self) {
-        let now = std::time::Instant::now();
+    fn cleanup(&mut self, now: std::time::Instant) {
         while let Some(instant) = self.expiration.peek()
             && *instant < now
         {
