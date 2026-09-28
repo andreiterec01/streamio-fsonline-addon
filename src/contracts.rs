@@ -230,6 +230,8 @@ impl<'de> Deserialize<'de> for Imdb {
 bitflags::bitflags! {
     pub struct OptionsBytes: u8 {
         const LOCAL_PLAYER = 1;
+        // No longer used. Kept for backwards compatibility
+        const SHOW_ORIGINAL_PLAYER = 2;
         const BROWSER_PLAYERS = 4;
         const FSONLINE_LINK = 8;
     }

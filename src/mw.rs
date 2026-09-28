@@ -7,20 +7,19 @@ use crate::{custom_extractor::DontLog, error::WebError};
 pub async fn log_request_response(request: Request, next: Next) -> Response {
     let now = std::time::Instant::now();
     let uri = request.uri().clone();
-    let method = request.method();
-    tracing::info!("Received request {method} {uri}");
+    let method = request.method().clone();
     let response = next.run(request).await;
     let dont_log = response.extensions().get::<DontLog>().is_some();
     if dont_log {
         tracing::debug!(
-            "Received request {}. Responded in {:.2}s with {}",
+            "Received request {method} {}. Responded in {:.2}s with {}",
             uri,
             now.elapsed().as_secs_f32(),
             response.status()
         );
     } else {
         tracing::info!(
-            "Received request {}. Responded in {:.2}s with {}",
+            "Received request {method} {}. Responded in {:.2}s with {}",
             uri,
             now.elapsed().as_secs_f32(),
             response.status()

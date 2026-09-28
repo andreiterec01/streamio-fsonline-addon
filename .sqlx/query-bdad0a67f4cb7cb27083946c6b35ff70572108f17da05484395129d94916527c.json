@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "CREATE TABLE IF NOT EXISTS movies(\r\n    imdb INTEGER NOT NULL,\r\n    server VARCHAR(32) NOT NULL,\r\n    segments_count INTEGER NOT NULL,\r\n    duration FLOAT NOT NULL,\r\n    last_acces INTEGER NOT NULL,\r\n    PRIMARY KEY(imdb, server)\r\n);\r\n\r\nCREATE TABLE IF NOT EXISTS segments(\r\n    imdb INTEGER NOT NULL,\r\n    server VARCHAR(32) NOT NULL,\r\n    segment INTEGER NOT NULL,\r\n    last_acces INTEGER,\r\n    size INTEGER NOT NULL,\r\n    start_time FLOAT,\r\n    PRIMARY KEY(imdb, server, segment)\r\n);\r\n\r\nCREATE TABLE IF NOT EXISTS subtitles(\r\n    imdb INTEGER NOT NULL,\r\n    server VARCHAR(32) NOT NULL,\r\n    language VARCHAR(4) NOT NULL,\r\n    text VARCHAR NOT NULL,\r\n    PRIMARY KEY(imdb, server, language)\r\n);\r\n\r\nCREATE INDEX IF NOT EXISTS idx_movies_last_acces ON movies(last_acces) WHERE last_acces IS NOT NULL;\r\n\r\nCREATE INDEX IF NOT EXISTS idx_segments_last_acces ON segments(imdb, server, last_acces, size, segment, start_time) WHERE last_acces IS NOT NULL;",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "bdad0a67f4cb7cb27083946c6b35ff70572108f17da05484395129d94916527c"
+}

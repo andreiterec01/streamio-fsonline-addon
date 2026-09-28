@@ -119,10 +119,10 @@ impl LocalPlayerInner {
             });
 
             let Some(compute_next) = times.get_next_to_compute(segment_id.segment_index) else {
-                tracing::info!("Nothing more to compute for segment: {:?}", segment_id);
+                tracing::debug!("Nothing more to compute for segment: {:?}", segment_id);
                 continue;
             };
-            tracing::info!(
+            tracing::debug!(
                 "Next compute for segment: {:?}, next_index: {}, time_taken: {:.2}",
                 segment_id,
                 compute_next.next_index,
