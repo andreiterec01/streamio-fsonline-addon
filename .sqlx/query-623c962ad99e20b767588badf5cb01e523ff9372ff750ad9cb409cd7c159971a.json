@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO segments (imdb, server, segment, size, start_time, last_acces) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(imdb, server, segment) DO UPDATE SET size=MAX(EXCLUDED.size, size), start_time=COALESCE(EXCLUDED.start_time, start_time), last_acces=COALESCE(EXCLUDED.last_acces, last_acces)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "623c962ad99e20b767588badf5cb01e523ff9372ff750ad9cb409cd7c159971a"
+}

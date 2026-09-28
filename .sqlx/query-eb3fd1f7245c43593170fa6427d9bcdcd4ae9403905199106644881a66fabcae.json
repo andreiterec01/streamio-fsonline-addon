@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT segments_count, duration FROM movies WHERE imdb=? AND server=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "segments_count",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "movies",
+            "name": "segments_count"
+          }
+        }
+      },
+      {
+        "name": "duration",
+        "ordinal": 1,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "movies",
+            "name": "duration"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "eb3fd1f7245c43593170fa6427d9bcdcd4ae9403905199106644881a66fabcae"
+}

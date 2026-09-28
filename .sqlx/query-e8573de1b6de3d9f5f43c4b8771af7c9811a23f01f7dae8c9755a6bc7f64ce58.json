@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE movies SET last_acces=? WHERE imdb=? AND server=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "e8573de1b6de3d9f5f43c4b8771af7c9811a23f01f7dae8c9755a6bc7f64ce58"
+}

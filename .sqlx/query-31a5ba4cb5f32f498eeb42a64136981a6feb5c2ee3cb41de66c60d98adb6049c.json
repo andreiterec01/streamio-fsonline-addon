@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM segments WHERE imdb=? AND server=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "31a5ba4cb5f32f498eeb42a64136981a6feb5c2ee3cb41de66c60d98adb6049c"
+}

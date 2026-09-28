@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT segment, size, start_time FROM segments WHERE imdb=? AND server=? ORDER BY segment",
+  "describe": {
+    "columns": [
+      {
+        "name": "segment",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "segment"
+          }
+        }
+      },
+      {
+        "name": "size",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "size"
+          }
+        }
+      },
+      {
+        "name": "start_time",
+        "ordinal": 2,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "start_time"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "da418d7b1c94a557f6ff0babdb810d13f9922ff12cad4e1e830736a312e66f0d"
+}

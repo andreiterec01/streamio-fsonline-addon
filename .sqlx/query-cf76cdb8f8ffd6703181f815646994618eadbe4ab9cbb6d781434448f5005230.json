@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM subtitles WHERE imdb=? AND server=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "cf76cdb8f8ffd6703181f815646994618eadbe4ab9cbb6d781434448f5005230"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR REPLACE INTO subtitles (imdb, server, language, text) VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "c751f7c0a6d9946f51e0f7008cb0b569d7651eb95c726e6ad29966ca0f73714f"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT text FROM subtitles WHERE imdb=? AND server=? AND language=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "text",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subtitles",
+            "name": "text"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d9183a1d95fdd02d87d5d20e26a64c0f686f66e9863d603d29c23ffbdbcdf115"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR REPLACE INTO movies (imdb, server, segments_count, duration, last_acces) VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "ec4fe57a1297eb2dcc19cf5c68f680755605d92da9ed21fa9fd39aeb09fed9b2"
+}

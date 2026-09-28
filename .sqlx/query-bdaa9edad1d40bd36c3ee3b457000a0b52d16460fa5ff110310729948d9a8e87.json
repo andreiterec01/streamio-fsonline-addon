@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.imdb, s.server, s.size, s.segment, s.start_time\nFROM segments s\nINNER JOIN movies m ON s.imdb = m.imdb AND s.server = m.server\nWHERE s.last_acces IS NOT NULL\nORDER BY\n    m.last_acces ASC,\n    s.last_acces ASC\nLIMIT ?;",
+  "describe": {
+    "columns": [
+      {
+        "name": "imdb",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "imdb"
+          }
+        }
+      },
+      {
+        "name": "server",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "server"
+          }
+        }
+      },
+      {
+        "name": "size",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "size"
+          }
+        }
+      },
+      {
+        "name": "segment",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "segment"
+          }
+        }
+      },
+      {
+        "name": "start_time",
+        "ordinal": 4,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "start_time"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "bdaa9edad1d40bd36c3ee3b457000a0b52d16460fa5ff110310729948d9a8e87"
+}

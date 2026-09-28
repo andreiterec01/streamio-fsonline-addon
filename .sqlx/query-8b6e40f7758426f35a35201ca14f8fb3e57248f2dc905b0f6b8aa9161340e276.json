@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM movies WHERE imdb=? AND server=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "8b6e40f7758426f35a35201ca14f8fb3e57248f2dc905b0f6b8aa9161340e276"
+}

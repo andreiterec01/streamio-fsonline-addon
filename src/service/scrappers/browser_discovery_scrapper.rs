@@ -40,13 +40,13 @@ impl scrappers::PlayerScrapper for BrowserDiscovery {
     async fn get_video(&self, url: &str) -> anyhow::Result<VideoAndSubtitlesScrapper> {
         use futures::StreamExt;
 
-        let page = self.browser.new_page(url).await?;
+        let page = self.browser.new_page("").await?;
         let r = async {
             let mut requests = page.event_listener::<EventRequestWillBeSent>().await?;
 
             tokio::time::timeout(Duration::from_secs(10), async {
                 page.wait_for_navigation().await?;
-                page.reload().await?;
+                page.goto(url).await?;
                 page.wait_for_navigation().await
             })
             .await

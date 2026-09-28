@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT SUM(size) FROM segments WHERE last_acces IS NOT NULL;",
+  "describe": {
+    "columns": [
+      {
+        "name": "SUM(size)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "707f39c7f082acefeecf5f9cfcbef385a0a33c0ef1d0019aef3a5777a1d24d63"
+}

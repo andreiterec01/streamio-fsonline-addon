@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE segments SET last_acces = NULL WHERE imdb=? AND server=? AND segment=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "33224241a541e67f0e8db9c373864bcacc5b5fe75217cf49efc8f026b227e67c"
+}
