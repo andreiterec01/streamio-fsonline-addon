@@ -927,7 +927,7 @@ impl LocalPlayerInner {
     }
 
     #[cfg(unix)]
-    async fn delete_file_sync(path: impl AsRef<Path>) -> anyhow::Result<()> {
+    fn delete_file_sync(path: impl AsRef<Path>) -> anyhow::Result<()> {
         std::fs::remove_file(path)?;
         Ok(())
     }
