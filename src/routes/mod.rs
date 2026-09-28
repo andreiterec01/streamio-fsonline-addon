@@ -73,29 +73,6 @@ pub struct Stream {
 }
 
 impl Stream {
-    fn url<'a>(
-        url: Arc<str>,
-        server_name: Arc<str>,
-        subtitles: impl IntoIterator<Item = &'a SubtitleFsonline>,
-        uses_https: bool,
-        host: &str,
-        imdb: Imdb,
-    ) -> Stream {
-        Stream {
-            subtitles: subtitles
-                .into_iter()
-                .map(|s| Subtitle::new(uses_https, host, s, imdb, &server_name))
-                .collect(),
-            name: "FSonline",
-            title: server_name,
-            url: Some(url),
-            behavior_hints: Some(BehaviourHints {
-                not_web_ready: true,
-            }),
-            external_url: None,
-        }
-    }
-
     fn local_player_url<'a>(
         server_name: Arc<str>,
         subtitles: impl IntoIterator<Item = &'a SubtitleFsonline>,
@@ -153,22 +130,6 @@ async fn series_function(
     imdb_id: Imdb,
 ) -> WebResult<Json<SeriesResponse>> {
     let r = movie.get(imdb_id).await?;
-    let original_players = if options.contains(OptionsBytes::SHOW_ORIGINAL_PLAYER) {
-        Some(r.players.iter().flat_map(|r| {
-            Some(Stream::url(
-                r.data.video.clone()?,
-                r.server_name.clone(),
-                r.data.subtitles.iter(),
-                uses_https,
-                &host,
-                imdb_id,
-            ))
-        }))
-    } else {
-        None
-    }
-    .into_iter()
-    .flatten();
 
     let browsers = if options.contains(OptionsBytes::BROWSER_PLAYERS) {
         Some(
@@ -242,11 +203,7 @@ async fn series_function(
         None
     };
 
-    let streams = local_players
-        .chain(original_url)
-        .chain(original_players)
-        .chain(browsers)
-        .collect();
+    let streams = local_players.chain(original_url).chain(browsers).collect();
     Ok(Json(SeriesResponse { streams }))
 }
 

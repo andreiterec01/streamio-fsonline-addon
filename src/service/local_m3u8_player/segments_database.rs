@@ -1,12 +1,10 @@
 use std::{
-    ops::Deref,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64},
     },
-    time::Duration,
 };
 
 use anyhow::Context;
@@ -19,7 +17,7 @@ use sqlx::sqlite::SqliteConnectOptions;
 use crate::{
     contracts::{Imdb, Language},
     service::{
-        ImdbToVideoServer, PlaylistInfoMetadata, SegmentInfo,
+        ImdbToVideoServer, MediaPlaylistQueue, PlaylistInfoMetadata, SegmentInfo,
         local_m3u8_player::{
             M3U8CacheKey, OneSegmentTime, SegmentId, SegmentsTime,
             populate_cache::LoadCacheRequest,
@@ -351,36 +349,9 @@ pub struct SegmentsContent<S> {
 pub struct NewLocalPlayerOptions {
     pub cache_directory: PathBuf,
     pub max_total_file_size: u64,
-    pub metadata_cache_size: u64,
-    pub metadata_cache_time_to_live: Duration,
-    pub metadata_cache_time_to_idle: Duration,
+
+    pub new_media_playlist: MediaPlaylistQueue,
     pub time_cache_options: TimeCacheOptions,
-}
-
-struct CounterWritter {
-    size: usize,
-}
-
-impl CounterWritter {
-    fn new() -> Self {
-        Self { size: 0 }
-    }
-}
-
-impl std::io::Write for CounterWritter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.size += buf.len();
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn weigher(key: &M3U8CacheKey, value: &Arc<MediaPlaylist>) -> u32 {
-    let mut writer = CounterWritter::new();
-    value.write_to(&mut writer).unwrap();
-    (key.size() + writer.size) as u32
 }
 
 #[derive(Clone)]
@@ -402,7 +373,6 @@ impl LocalPlayer {
         >,
     > {
         let end = segment_range.end;
-        // TODO: remove the unwrap
         self.load_cache_sender
             .send(LoadCacheRequest {
                 segment_id: SegmentId {
@@ -413,9 +383,7 @@ impl LocalPlayer {
                     segment_index: end,
                 },
             })
-            .unwrap();
-        // TODO: remove this log
-        tracing::info!("Sent load cache request for segment: {:?}", end,);
+            .ok();
         self.inner.get_segments(imdb, server, segment_range).await
     }
 
@@ -437,7 +405,6 @@ pub struct LocalPlayerInner {
     pub(super) time_cache: time_cache_db::TimeCache,
 
     cache_directory: Arc<std::path::Path>,
-    m3u8_master_files: moka::future::Cache<M3U8CacheKey, Arc<MediaPlaylist>>,
 
     file_path_mutexes: crate::utils::MultipleValueMutex<(M3U8CacheKey, usize)>,
 
@@ -446,6 +413,8 @@ pub struct LocalPlayerInner {
     max_total_file_size: u64,
 
     pub(super) cache_in_the_future: std::time::Duration,
+
+    new_media_playlist: MediaPlaylistQueue,
 }
 
 impl LocalPlayer {
@@ -455,10 +424,8 @@ impl LocalPlayer {
         NewLocalPlayerOptions {
             cache_directory,
             max_total_file_size,
-            metadata_cache_size,
-            metadata_cache_time_to_idle,
-            metadata_cache_time_to_live,
             time_cache_options,
+            new_media_playlist,
         }: NewLocalPlayerOptions,
     ) -> anyhow::Result<Self> {
         tokio::fs::create_dir_all(&cache_directory).await?;
@@ -468,11 +435,7 @@ impl LocalPlayer {
         let total_file_size = dbg!(db.get_total_size().await?);
 
         let time_cache = TimeCache::new(db.clone(), time_cache_options).await?;
-        let m3u8_master_files = moka::future::CacheBuilder::new(metadata_cache_size)
-            .weigher(weigher)
-            .time_to_live(metadata_cache_time_to_live)
-            .time_to_idle(metadata_cache_time_to_idle)
-            .build();
+
         let inner = LocalPlayerInner {
             client,
             time_cache,
@@ -483,8 +446,8 @@ impl LocalPlayer {
             max_total_file_size,
             total_file_size: Arc::new(AtomicU64::new(total_file_size)),
             cache_directory: cache_directory.into(),
-            m3u8_master_files,
             cache_in_the_future: std::time::Duration::from_secs(15 * 60),
+            new_media_playlist,
         };
         inner.check_and_start_cleanup_if_needed(0);
         let inner = Arc::new(inner);
@@ -788,65 +751,17 @@ impl LocalPlayerInner {
         }
     }
 
-    async fn get_m3u8_inner(
-        m3u8_master_files: &moka::future::Cache<M3U8CacheKey, Arc<MediaPlaylist>>,
-        imdb_to_video_service: &ImdbToVideoServer,
-        client: &reqwest::Client,
-        m3u8_key: &M3U8CacheKey,
+    async fn new_metadata_received(
+        new_media_playlist: &MediaPlaylistQueue,
         db: &Database,
         time_cache: &TimeCache,
-    ) -> anyhow::Result<Arc<MediaPlaylist>> {
-        let r = m3u8_master_files
-            .try_get_with_by_ref(m3u8_key, async {
-                let m3u8_url = imdb_to_video_service
-                    .get_from_server(m3u8_key.imdb, &m3u8_key.server_name)
-                    .await?
-                    .context("Player not found")?
-                    .data
-                    .video
-                    .context("Video url not scrapped")?;
-
-                let master_bytes = client
-                    .get(m3u8_url.deref())
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .bytes()
-                    .await?;
-
-                let mut master = m3u8_rs::parse_master_playlist_res(&master_bytes)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                drop(master_bytes);
-
-                let mut first_stream = true;
-                master.variants.retain(|v| {
-                    if v.is_i_frame {
-                        return true;
-                    }
-                    if first_stream {
-                        first_stream = false;
-                        return true;
-                    }
-                    tracing::warn!("Multiple streams available for {m3u8_url}");
-                    false
+    ) -> anyhow::Result<()> {
+        let mut futures = Vec::new();
+        while let Some((m3u8_key, playlist)) = new_media_playlist.pop() {
+            futures.push(async move {
+                let guard = scopeguard::guard((), |()| {
+                    new_media_playlist.push((m3u8_key.clone(), playlist.clone()));
                 });
-                let stream = master
-                    .variants
-                    .iter()
-                    .find(|v| !v.is_i_frame)
-                    .context("No data stream")?;
-
-                let playlist_data = client
-                    .get(&stream.uri)
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .bytes()
-                    .await?;
-
-                let playlist = m3u8_rs::parse_media_playlist_res(&playlist_data)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-
                 let old_metadata = db
                     .get_playlist_metadata(m3u8_key.imdb, &m3u8_key.server_name)
                     .await?;
@@ -856,24 +771,38 @@ impl LocalPlayerInner {
                         || (old_metadata.movie_duration - new_metadata.movie_duration).abs() > 0.1)
                 {
                     tracing::warn!("Deleting the full movie for {m3u8_key:?}. Metadata mismatch");
-                    time_cache.delete_full_movie(m3u8_key, new_metadata).await?;
+                    time_cache
+                        .delete_full_movie(&m3u8_key, new_metadata)
+                        .await?;
                 } else {
                     // TODO: we can also check at the beginning if we have all the segments. If we do, we can skip the request to fsonline
                     db.set_playlist_metadata(m3u8_key.imdb, &m3u8_key.server_name, &new_metadata)
                         .await?;
                 }
-
-                anyhow::Ok(Arc::new(playlist))
-            })
-            .await;
-
-        match r {
-            Ok(r) => Ok(r),
-            Err(e) => match Arc::try_unwrap(e) {
-                Ok(e) => Err(e),
-                Err(e) => Err(anyhow::anyhow!("{e}")),
-            },
+                scopeguard::ScopeGuard::into_inner(guard);
+                anyhow::Ok(())
+            });
         }
+        try_join_all(futures).await?;
+        Ok(())
+    }
+
+    async fn get_m3u8_inner(
+        imdb_to_video_service: &ImdbToVideoServer,
+        m3u8_key: &M3U8CacheKey,
+        db: &Database,
+        time_cache: &TimeCache,
+        new_media_playlist: &MediaPlaylistQueue,
+    ) -> anyhow::Result<Arc<MediaPlaylist>> {
+        let playlist = imdb_to_video_service
+            .get_from_server(m3u8_key.imdb, &m3u8_key.server_name)
+            .await?
+            .context("Player not found")?
+            .data
+            .video
+            .context("Video url not scrapped")?;
+        Self::new_metadata_received(new_media_playlist, db, time_cache).await?;
+        Ok(playlist)
     }
 
     pub async fn compute_m3u8_real_segments_duration(
@@ -940,12 +869,11 @@ impl LocalPlayerInner {
     // TODO: find a way to fix the cache duration
     pub async fn get_m3u8(&self, m3u8_key: &M3U8CacheKey) -> anyhow::Result<Arc<MediaPlaylist>> {
         Self::get_m3u8_inner(
-            &self.m3u8_master_files,
             &self.imdb_to_video_service,
-            &self.client,
             m3u8_key,
             &self.db,
             &self.time_cache,
+            &self.new_media_playlist,
         )
         .await
     }

@@ -72,12 +72,17 @@ pub struct PlayerOption {
     pub iframe_player: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug)]
 pub struct PlayerData {
     pub server_name: Arc<str>,
     pub iframe_player: Arc<str>,
     pub data: VideoAndSubtitles,
+}
+
+impl PlayerData {
+    pub(crate) fn size(&self) -> usize {
+        size_of::<Arc<str>>() * 2 + self.data.size()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Deserialize)]
@@ -225,7 +230,6 @@ impl<'de> Deserialize<'de> for Imdb {
 bitflags::bitflags! {
     pub struct OptionsBytes: u8 {
         const LOCAL_PLAYER = 1;
-        const SHOW_ORIGINAL_PLAYER = 2;
         const BROWSER_PLAYERS = 4;
         const FSONLINE_LINK = 8;
     }

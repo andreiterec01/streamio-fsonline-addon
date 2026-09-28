@@ -4,8 +4,8 @@ use anyhow::Context;
 use chromiumoxide::{Browser, cdp::browser_protocol::network::EventRequestWillBeSent};
 
 use crate::service::{
-    fsonline_service::{SubtitleFsonline, VideoAndSubtitles},
-    scrappers,
+    fsonline_service::{SubtitleFsonline, VideoAndSubtitlesScrapper},
+    scrappers::{self},
 };
 
 pub struct BrowserDiscovery {
@@ -37,7 +37,7 @@ impl BrowserDiscovery {
 
 #[async_trait::async_trait]
 impl scrappers::PlayerScrapper for BrowserDiscovery {
-    async fn get_video(&self, url: &str) -> anyhow::Result<VideoAndSubtitles> {
+    async fn get_video(&self, url: &str) -> anyhow::Result<VideoAndSubtitlesScrapper> {
         use futures::StreamExt;
 
         let page = self.browser.new_page(url).await?;
@@ -55,7 +55,7 @@ impl scrappers::PlayerScrapper for BrowserDiscovery {
             let mut elapsed_at = tokio::time::Instant::now() + Duration::from_secs(3);
             let player_future = async {
                 let mut subtitles = Vec::new();
-                let mut video = None;
+                let mut m3u8_url = None;
                 while let Some(event) = tokio::time::timeout_at(elapsed_at, requests.next())
                     .await
                     .ok()
@@ -74,8 +74,8 @@ impl scrappers::PlayerScrapper for BrowserDiscovery {
                         continue;
                     };
                     if last_part == "master.m3u8" {
-                        let was_empty = video.is_none();
-                        video = Some(url.to_string().into());
+                        let was_empty = m3u8_url.is_none();
+                        m3u8_url = Some(url.to_string().into());
                         if was_empty && !subtitles.is_empty() {
                             // if we have everything, wait only another 0.2 seconds to make sure we get all the subtitles
                             elapsed_at = tokio::time::Instant::now() + Duration::from_secs_f32(0.2);
@@ -85,18 +85,18 @@ impl scrappers::PlayerScrapper for BrowserDiscovery {
                         if let Some(subtitle) = SubtitleFsonline::new(url.to_string().into()) {
                             subtitles.push(subtitle);
                         }
-                        if was_empty && video.is_some() {
+                        if was_empty && m3u8_url.is_some() {
                             // if we have everything, wait only another 0.2 seconds to make sure we get all the subtitles
                             elapsed_at = tokio::time::Instant::now() + Duration::from_secs_f32(0.2);
                         }
                     }
                 }
 
-                if subtitles.is_empty() && video.is_none() {
+                if subtitles.is_empty() && m3u8_url.is_none() {
                     anyhow::bail!("Didn't find the video or the subtitles");
                 }
-                Ok(VideoAndSubtitles {
-                    video,
+                Ok(VideoAndSubtitlesScrapper {
+                    m3u8_url,
                     subtitles: subtitles.into(),
                 })
             };

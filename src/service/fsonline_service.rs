@@ -2,12 +2,13 @@ use std::{collections::BTreeSet, ops::Deref, sync::Arc, time::Duration};
 
 use futures::future::join_all;
 use itertools::Itertools;
+use m3u8_rs::MediaPlaylist;
 use scraper::{Element, Html, Selector};
 use serde::Serialize;
 
 use crate::{
-    contracts::{Language, MovieKey, PlayerData, PlayerOption, SeriesData},
-    service::scrappers,
+    contracts::{Imdb, Language, MovieKey, PlayerData, PlayerOption, SeriesData},
+    service::{MediaPlaylistQueue, local_m3u8_player::M3U8CacheKey, scrappers},
 };
 
 const INVALID_BROWSER_SERVERS: &[&str] = &["Doodstream"];
@@ -17,15 +18,6 @@ const INVALID_SCRAPPING_SERVERS: &[&str] = &["Vidsrc", "VOE"];
 pub struct MovieData {
     pub movie_name: Arc<str>,
     pub release_year: u16,
-}
-
-#[derive(Clone)]
-pub struct VideoServer {
-    // TODO: maybe remove the cache from here? And only use the cache from the LocalPlayer.
-    // This way the cache from LocalPlayer doesn't expires at a different time than the cache from VideoServer.
-    cache: moka::future::Cache<MovieKey, Arc<[PlayerData]>>,
-    player_scrapper: Arc<scrappers::PlayerScrappers>,
-    client: reqwest::Client,
 }
 
 fn normalize_movie_name(movie: &str) -> String {
@@ -38,21 +30,70 @@ pub struct VideoServerResponse {
     pub fsonline_url: String,
 }
 
+struct CounterWritter {
+    size: usize,
+}
+
+impl CounterWritter {
+    fn new() -> Self {
+        Self { size: 0 }
+    }
+}
+
+impl std::io::Write for CounterWritter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.size += buf.len();
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn weigher(key: &Imdb, value: &Arc<[PlayerData]>) -> u32 {
+    let value_size = size_of_val(value) + value.iter().map(|v| v.size()).sum::<usize>();
+    (size_of_val(key) + value_size) as u32
+}
+
+pub struct VideoServerOptions {
+    pub metadata_cache_size: u64,
+    pub metadata_cache_time_to_live: Duration,
+    pub metadata_cache_time_to_idle: Duration,
+}
+
+#[derive(Clone)]
+pub struct VideoServer {
+    cache: moka::future::Cache<Imdb, Arc<[PlayerData]>>,
+    player_scrapper: Arc<scrappers::PlayerScrappers>,
+    client: reqwest::Client,
+    new_metadata: MediaPlaylistQueue,
+}
+
 impl VideoServer {
     pub async fn new(
         client: reqwest::Client,
         player_scrapper: scrappers::PlayerScrappers,
+        new_metadata: MediaPlaylistQueue,
+        VideoServerOptions {
+            metadata_cache_size,
+            metadata_cache_time_to_live,
+            metadata_cache_time_to_idle,
+        }: VideoServerOptions,
     ) -> anyhow::Result<Self> {
+        let m3u8_master_files = moka::future::CacheBuilder::new(metadata_cache_size)
+            .weigher(weigher)
+            .time_to_live(metadata_cache_time_to_live)
+            .time_to_idle(metadata_cache_time_to_idle)
+            .build();
         Ok(Self {
             client,
             player_scrapper: Arc::new(player_scrapper),
-            cache: moka::future::CacheBuilder::new(100_000)
-                .time_to_live(Duration::from_secs(3600 * 4))
-                .build(),
+            cache: m3u8_master_files,
+            new_metadata,
         })
     }
 
-    pub async fn get(&self, key: &MovieKey) -> anyhow::Result<VideoServerResponse> {
+    pub async fn get(&self, imdb: Imdb, key: &MovieKey) -> anyhow::Result<VideoServerResponse> {
         let MovieKey { movie, data } = key;
         let movie = normalize_movie_name(movie);
 
@@ -68,7 +109,7 @@ impl VideoServer {
         };
         let players = self
             .cache
-            .try_get_with_by_ref(key, async {
+            .try_get_with(imdb, async {
                 let response = self
                     .client
                     .get(&initial_url)
@@ -125,8 +166,16 @@ impl VideoServer {
                         server_name: p.server_name.into(),
                     }
                 });
-                let players = join_all(players).await.into_iter().collect();
-
+                let players: Arc<[PlayerData]> = join_all(players).await.into_iter().collect();
+                for player in players.iter() {
+                    if let Some(playlist) = &player.data.video {
+                        let m3u8_key = M3U8CacheKey {
+                            imdb,
+                            server_name: player.server_name.clone().into(),
+                        };
+                        self.new_metadata.push((m3u8_key, playlist.clone()));
+                    }
+                }
                 anyhow::Ok(players)
             })
             .await
@@ -183,16 +232,44 @@ fn get_player_options(body: String) -> Vec<PlayerOption> {
         .collect::<Vec<_>>()
 }
 
-#[derive(Debug, Serialize, Clone, Default)]
-pub struct VideoAndSubtitles {
-    pub video: Option<Arc<str>>,
+#[derive(Debug, Default)]
+pub struct VideoAndSubtitlesScrapper {
+    pub m3u8_url: Option<String>,
     pub subtitles: Arc<[SubtitleFsonline]>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VideoAndSubtitles {
+    pub video: Option<Arc<MediaPlaylist>>,
+    pub subtitles: Arc<[SubtitleFsonline]>,
+}
+
+impl VideoAndSubtitles {
+    pub(crate) fn size(&self) -> usize {
+        let video_size = self
+            .video
+            .as_ref()
+            .map(|value| {
+                let mut writer = CounterWritter::new();
+                value.write_to(&mut writer).unwrap();
+                writer.size
+            })
+            .unwrap_or_default();
+        let subtitles_size = self.subtitles.iter().map(|s| s.size()).sum::<usize>();
+        size_of_val(self) + video_size + subtitles_size
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
 pub struct SubtitleFsonline {
     pub url: Arc<str>,
     pub lang: Language,
+}
+
+impl SubtitleFsonline {
+    fn size(&self) -> usize {
+        size_of_val(self) + self.url.len()
+    }
 }
 
 impl SubtitleFsonline {

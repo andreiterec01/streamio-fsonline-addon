@@ -1,7 +1,7 @@
 use scraper::Selector;
 
 use crate::service::{
-    fsonline_service::{SubtitleFsonline, VideoAndSubtitles},
+    fsonline_service::{SubtitleFsonline, VideoAndSubtitlesScrapper},
     scrappers::{PlayerScrapper, SpecificScrapper},
 };
 
@@ -27,7 +27,7 @@ impl SpecificScrapper for FileSuN {
 
 #[async_trait::async_trait]
 impl PlayerScrapper for FileSuN {
-    async fn get_video(&self, url: &str) -> anyhow::Result<VideoAndSubtitles> {
+    async fn get_video(&self, url: &str) -> anyhow::Result<VideoAndSubtitlesScrapper> {
         let html_string = self
             .client
             .get(url)
@@ -61,7 +61,7 @@ impl FileSuNParser {
         }
     }
 
-    fn parse_file_sun_html(&self, html_string: String) -> VideoAndSubtitles {
+    fn parse_file_sun_html(&self, html_string: String) -> VideoAndSubtitlesScrapper {
         let html = { scraper::html::Html::parse_document(&html_string) };
         drop(html_string);
         let selector = Selector::parse("script").unwrap();
@@ -86,8 +86,8 @@ impl FileSuNParser {
                 .flat_map(SubtitleFsonline::new);
             subtitles_result.extend(subtitles);
         }
-        VideoAndSubtitles {
-            video: m3u8_url.map(|url| url.into()),
+        VideoAndSubtitlesScrapper {
+            m3u8_url: m3u8_url.map(|url| url.into()),
             subtitles: subtitles_result.into(),
         }
     }
@@ -103,7 +103,7 @@ mod tests {
         let file_sun = include_str!("../../../test_files/filesun_html.html").to_owned();
         let r = FileSuNParser::new().parse_file_sun_html(file_sun);
         assert_eq!(
-            r.video.as_deref(),
+            r.m3u8_url.as_deref(),
             Some(
                 "https://prx-1559-ant.vmwesa.online/hls2/02/02589/k0kfg2ai8kny_,n,l,.urlset/master.m3u8?t=gcCCgLPFEQ2_tXrBUryjbVcJTvZw9tPUytg3SkYsZc4=&s=1783968858&e=43200&v=&srv=bck-1564-ant-p&i=0.4&sp=0&asn=8708"
             )

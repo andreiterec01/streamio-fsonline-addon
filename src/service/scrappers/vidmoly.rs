@@ -1,7 +1,7 @@
 use scraper::Selector;
 
 use crate::service::{
-    fsonline_service::{SubtitleFsonline, VideoAndSubtitles},
+    fsonline_service::{SubtitleFsonline, VideoAndSubtitlesScrapper},
     scrappers::{PlayerScrapper, SpecificScrapper},
 };
 
@@ -27,7 +27,7 @@ impl SpecificScrapper for VidmolyScrapper {
 
 #[async_trait::async_trait]
 impl PlayerScrapper for VidmolyScrapper {
-    async fn get_video(&self, url: &str) -> anyhow::Result<VideoAndSubtitles> {
+    async fn get_video(&self, url: &str) -> anyhow::Result<VideoAndSubtitlesScrapper> {
         let html_string = self
             .client
             .get(url)
@@ -61,7 +61,7 @@ impl VidmolyParser {
         }
     }
 
-    fn parse_vidmoly_html(&self, html_string: String) -> VideoAndSubtitles {
+    fn parse_vidmoly_html(&self, html_string: String) -> VideoAndSubtitlesScrapper {
         let html = { scraper::html::Html::parse_document(&html_string) };
         drop(html_string);
         let selector = Selector::parse("script").unwrap();
@@ -86,8 +86,8 @@ impl VidmolyParser {
                 .flat_map(SubtitleFsonline::new);
             subtitles_result.extend(subtitles);
         }
-        VideoAndSubtitles {
-            video: m3u8_url.map(|url| url.into()),
+        VideoAndSubtitlesScrapper {
+            m3u8_url,
             subtitles: subtitles_result.into(),
         }
     }
@@ -103,7 +103,7 @@ mod tests {
         let vidmoly = include_str!("../../../test_files/vidmoly_html.html").to_owned();
         let r = VidmolyParser::new().parse_vidmoly_html(vidmoly);
         assert_eq!(
-            r.video.as_deref(),
+            r.m3u8_url.as_deref(),
             Some(
                 "https://prx-1546-ant.vmwesa.online/hls2/01/02469/u1lemqhj7hqi_n/master.m3u8?t=rQp1o1rXAXxH0Hosd-PtcoR0JzjCcqTK5KNz2YX6T3c=&s=1781334063&e=43200&v=&srv=transit-1478-v1&i=0.4&sp=0&asn=8708"
             )

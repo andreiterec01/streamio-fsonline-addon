@@ -82,7 +82,7 @@ impl LocalPlayerInner {
 
         let mut mini =
             small_cache::SmallCache::<M3U8CacheKey, MovieData>::new(Duration::from_secs(15 * 60));
-        loop {
+        'a: loop {
             while let Ok(LoadCacheRequest { segment_id }) = requests.try_recv() {
                 heap.push(segment_id, self.cache_in_the_future);
             }
@@ -96,13 +96,23 @@ impl LocalPlayerInner {
                     (segment_id, self.cache_in_the_future)
                 };
 
-            // TODO: remove this unwrap
-            let segments_count = self
+            let Some(segments_count) = self
                 .get_m3u8(&segment_id.m3u8)
                 .await
-                .unwrap()
-                .segments
-                .len();
+                .inspect_err(|e| {
+                    tracing::error!(
+                        "Failed to compute the segment count for {:?}: {e:?}",
+                        segment_id.m3u8
+                    );
+                })
+                .ok()
+                .map(|v| v.segments.len())
+            else {
+                continue;
+            };
+            if segment_id.segment_index >= segments_count {
+                continue;
+            }
             let times = mini.get_or_insert_mut(segment_id.m3u8.clone(), || MovieData {
                 next_compute: HashMap::new(),
                 segments_count,
@@ -137,10 +147,18 @@ impl LocalPlayerInner {
                 }
             };
             let mut ts = ts_parser::TsTimeParser::new(false);
-            //TODO: remove the unwrap
-            while let Some(bytes) = stream.stream.try_next().await.unwrap() {
+            loop {
+                let bytes = match stream.stream.try_next().await {
+                    Ok(Some(bytes)) => bytes,
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::error!("Failed to read the stream bytes: {e:?}");
+                        continue 'a;
+                    }
+                };
                 ts.parse_packets(bytes);
             }
+
             let duration =
                 if let (Some(start_time), Some(end_time)) = (ts.start_time(), ts.end_time()) {
                     end_time - start_time

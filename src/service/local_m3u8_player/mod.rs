@@ -20,7 +20,7 @@ pub struct M3U8CacheKey {
 }
 
 impl M3U8CacheKey {
-    fn size(&self) -> usize {
+    pub(crate) fn size(&self) -> usize {
         self.server_name.len() + size_of::<Self>()
     }
 }

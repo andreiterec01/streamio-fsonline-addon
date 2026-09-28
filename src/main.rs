@@ -15,8 +15,8 @@ use tracing_subscriber::{EnvFilter, fmt::time::LocalTime};
 use crate::{
     routes::install_ui,
     service::{
-        ImdbToVideoServer,
-        fsonline_service::VideoServer,
+        ImdbToVideoServer, MediaPlaylistQueue,
+        fsonline_service::{VideoServer, VideoServerOptions},
         imdb_service::ImdbService,
         local_m3u8_player::{self, segments_database::LocalPlayer},
         scrappers::{PlayerScrappers, file_sun::FileSuN, vidmoly::VidmolyScrapper},
@@ -78,10 +78,25 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    let mut scrappers = PlayerScrappers::new(browser);
+    let mut scrappers = PlayerScrappers::new(client.clone(), browser);
     scrappers.add_scrapper(VidmolyScrapper::new(client.clone()));
     scrappers.add_scrapper(FileSuN::new(client.clone()));
-    let video_service = VideoServer::new(client.clone(), scrappers).await?;
+
+    let new_media_playlist = MediaPlaylistQueue::default();
+
+    let video_server_options = VideoServerOptions {
+        metadata_cache_size: args.master_cache_size_mb * 1024 * 1024,
+        metadata_cache_time_to_live: Duration::from_secs(args.metadata_cache_time_to_live),
+        metadata_cache_time_to_idle: Duration::from_secs(args.metadata_cache_time_to_idle),
+    };
+
+    let video_service = VideoServer::new(
+        client.clone(),
+        scrappers,
+        new_media_playlist.clone(),
+        video_server_options,
+    )
+    .await?;
     let imdb_server = ImdbService::new(client.clone());
     let imdb_to_video_server = ImdbToVideoServer::new(video_service.clone(), imdb_server);
 
@@ -97,10 +112,8 @@ async fn main() -> anyhow::Result<()> {
         crate::service::local_m3u8_player::segments_database::NewLocalPlayerOptions {
             cache_directory: args.cache_path,
             max_total_file_size: 1024 * 1024 * args.file_segments_cache_size_mb,
-            metadata_cache_size: args.master_cache_size_mb * 1024 * 1024,
-            metadata_cache_time_to_live: Duration::from_secs(args.metadata_cache_time_to_live),
-            metadata_cache_time_to_idle: Duration::from_secs(args.metadata_cache_time_to_idle),
             time_cache_options,
+            new_media_playlist,
         };
 
     let local_player = LocalPlayer::new(

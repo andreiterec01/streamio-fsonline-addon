@@ -1,4 +1,4 @@
-use std::ops::Deref;
+use std::{ops::Deref, sync::Arc};
 
 use m3u8_rs::MediaPlaylist;
 
@@ -7,6 +7,7 @@ use crate::{
     service::{
         fsonline_service::{MovieData, VideoServer, VideoServerResponse},
         imdb_service::ImdbService,
+        local_m3u8_player::M3U8CacheKey,
     },
 };
 
@@ -15,6 +16,8 @@ pub mod imdb_service;
 pub mod local_m3u8_player;
 pub mod scrappers;
 pub mod small_cache;
+
+pub type MediaPlaylistQueue = Arc<crossbeam::queue::SegQueue<(M3U8CacheKey, Arc<MediaPlaylist>)>>;
 
 pub struct PlaylistInfoMetadata {
     pub movie_duration: f64,
@@ -70,10 +73,13 @@ impl ImdbToVideoServer {
         };
         let r = self
             .video_service
-            .get(&MovieKey {
-                movie: movie_name,
-                data,
-            })
+            .get(
+                imdb_id,
+                &MovieKey {
+                    movie: movie_name,
+                    data,
+                },
+            )
             .await?;
         Ok(r)
     }
