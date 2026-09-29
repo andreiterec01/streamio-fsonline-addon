@@ -79,6 +79,7 @@ impl Interval {
         segments_count: usize,
         duration: f32,
         initial_segments: impl IntoIterator<Item = OneSegmentTime>,
+        dont_compute: impl IntoIterator<Item = usize>,
     ) -> Self {
         let mut ranges = vec![Item {
             segment_start_time: 0.,
@@ -86,7 +87,7 @@ impl Interval {
             segments: 0..segments_count,
         }];
 
-        let forbidden = HashSet::new();
+        let forbidden = dont_compute.into_iter().collect::<HashSet<_>>();
         for item in initial_segments {
             let (index, _) = ranges
                 .iter()
@@ -125,6 +126,10 @@ impl Interval {
             segment_index,
             interval: self,
         })
+    }
+
+    pub fn forbidden_indexes(&self) -> impl Iterator<Item = usize> {
+        self.forbidden.iter().copied()
     }
 }
 

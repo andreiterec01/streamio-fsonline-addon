@@ -16,7 +16,6 @@ use crate::{
         },
     },
     ts_parser,
-    utils::MultipleValueMutex,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -39,16 +38,16 @@ pub struct TimeCacheOptions {
 #[derive(Clone)]
 struct SegmentTimeCacheValue {
     segments_time: Arc<[OneSegmentTime]>,
+    dont_compute: Arc<[usize]>,
     movie_duration: f32,
     total_segments_count: usize,
 }
 
 #[derive(Clone)]
 pub struct TimeCache {
-    mutexes_get_or_fetch: MultipleValueMutex<M3U8CacheKey>,
     segments_time_cache_moka: moka::future::Cache<M3U8CacheKey, SegmentTimeCacheValue>,
-    smaller_time_between_segments: f32,
-    bigger_time_between_segments: f32,
+    target_time_between_segments: f32,
+    max_time_between_segments: f32,
     timeout_fast_time: Duration,
     client: reqwest::Client,
     cache_directory: PathBuf,
@@ -83,10 +82,9 @@ impl TimeCache {
             .build();
 
         Ok(Self {
-            mutexes_get_or_fetch: MultipleValueMutex::new(),
             cache_directory,
-            smaller_time_between_segments,
-            bigger_time_between_segments,
+            target_time_between_segments: smaller_time_between_segments,
+            max_time_between_segments: bigger_time_between_segments,
             timeout_fast_time,
             client,
             segments_time_cache_moka,
@@ -97,7 +95,7 @@ impl TimeCache {
     async fn get_segment_time(
         &self,
         url: &str,
-        deadline_on: Option<tokio::time::Instant>,
+        deadline_on: tokio::time::Instant,
     ) -> Result<f32, GetSegmentTimeError> {
         let client = &self.client;
         let segment_uri = url;
@@ -183,14 +181,10 @@ impl TimeCache {
 
                 Err(RetryOrStop::Retry(e)) => {
                     tracing::error!("Error received: {e:?}");
-                    if let Some(deadline) = deadline_on {
-                        if tokio::time::Instant::now() + Duration::from_secs(2) < deadline {
-                            tokio::time::sleep(Duration::from_secs(2)).await;
-                        } else {
-                            return Err(GetSegmentTimeError::Timeout);
-                        }
-                    } else {
+                    if tokio::time::Instant::now() + Duration::from_secs(2) < deadline_on {
                         tokio::time::sleep(Duration::from_secs(2)).await;
+                    } else {
+                        return Err(GetSegmentTimeError::Timeout);
                     }
                 }
                 Err(RetryOrStop::Stop) => {
@@ -227,6 +221,15 @@ impl TimeCache {
                     tracing::warn!("Received packet for {id:?}, but we failed to parse it");
                     return Op::Nop;
                 };
+                let dont_compute = if old.dont_compute.contains(&id.segment_index) {
+                    old.dont_compute
+                        .iter()
+                        .filter(|x| **x != id.segment_index)
+                        .copied()
+                        .collect()
+                } else {
+                    old.dont_compute
+                };
                 let new_segments = old.segments_time[..index]
                     .iter()
                     .cloned()
@@ -240,6 +243,7 @@ impl TimeCache {
                     segments_time: Arc::from(new_segments),
                     movie_duration: old.movie_duration,
                     total_segments_count: old.total_segments_count,
+                    dont_compute,
                 };
 
                 Op::Put(new_value)
@@ -251,8 +255,7 @@ impl TimeCache {
         &self,
         m3u8: &M3U8CacheKey,
         original_media_playlist: &MediaPlaylist,
-        time_between_segments: f32,
-        deadline_on: Option<tokio::time::Instant>,
+        deadline_on: tokio::time::Instant,
     ) -> anyhow::Result<(Arc<[OneSegmentTime]>, bool)> {
         let movie_duration: f32 = original_media_playlist
             .segments
@@ -282,7 +285,8 @@ impl TimeCache {
                                 total_segments: segments_len,
                             }});
 
-                        SegmentTimeCacheValue { segments_time: times.into(), movie_duration: metadata.movie_duration as f32, total_segments_count: metadata.total_segments }
+                        // TODO: maybe we want to also save in the database so we don't compute this times
+                        SegmentTimeCacheValue { segments_time: times.into(), movie_duration: metadata.movie_duration as f32, total_segments_count: metadata.total_segments,dont_compute: Arc::default() }
                     }
                     Some(entry) => {
                         entry.into_value()
@@ -304,15 +308,17 @@ impl TimeCache {
                     segments_len,
                     movie_duration,
                     times.iter().cloned(),
+                    result.dont_compute.into_iter().copied()
                 );
-                finished_computing= intervals.next_best_to_split().is_none();
+                finished_computing = intervals.next_best_to_split().is_none();
                 while let Some(next_interval) = intervals.next_best_to_split()
-                    && deadline_on.is_none_or(|d| d > tokio::time::Instant::now())
                 {
                     let duration = next_interval.item().duration();
-                    if duration < time_between_segments {
-                        tracing::info!("Finished computing");
+                    if duration < self.target_time_between_segments {
                         finished_computing = true;
+                        break;
+                    }
+                    if duration < self.max_time_between_segments && tokio::time::Instant::now() > deadline_on {
                         break;
                     }
 
@@ -350,28 +356,33 @@ impl TimeCache {
                                 );
                             }
                         }
-                        Err(e) => {
+                        Err(GetSegmentTimeError::Timeout) => {
+                            tracing::info!("Timeout getting segment time for index {index}");
+                            break;
+                        }
+                        Err(GetSegmentTimeError::Other(e)) => {
                             tracing::error!(
                                 "Failed to get segment timestamp for index {index}: {e:?}"
                             );
                             next_interval.remove();
+                            something_changed = true;
                         }
                     }
                 }
 
                 if something_changed {
                     times.to_mut().sort_by_key(|t| t.segment_index);
-                    anyhow::Ok( Op::Put(SegmentTimeCacheValue {
+                    anyhow::Ok(Op::Put(SegmentTimeCacheValue {
                         segments_time: Arc::from(times.into_owned()),
                         movie_duration,
                         total_segments_count: segments_len,
+                        dont_compute: intervals.forbidden_indexes().collect()
                     }))
                 } else {
                     anyhow::Ok(Op::Nop)
                 }
             })
             .await;
-
         Ok((r?.unwrap().into_value().segments_time, finished_computing))
     }
 
@@ -383,45 +394,23 @@ impl TimeCache {
     ) -> anyhow::Result<Arc<[OneSegmentTime]>> {
         if fast_response {
             let deadline_on = tokio::time::Instant::now() + self.timeout_fast_time;
-            // This guard is usefull so we don't end up waiting more than intended. If another requests come between the 2 get_inner requests.
-            let _guard = self.mutexes_get_or_fetch.lock_mutex(m3u8.clone()).await;
-            let (mut segments, _) = self
-                .get_inner(
-                    m3u8,
-                    original_media_playlist,
-                    self.bigger_time_between_segments,
-                    None,
-                )
+            let (segments, _) = self
+                .get_inner(m3u8, original_media_playlist, deadline_on)
                 .await?;
-
-            if deadline_on < tokio::time::Instant::now() {
-                (segments, _) = self
-                    .get_inner(
-                        m3u8,
-                        original_media_playlist,
-                        self.smaller_time_between_segments,
-                        Some(deadline_on),
-                    )
-                    .await?;
-            }
             Ok(segments)
         } else {
-            let mut counter = 0;
+            // TODO: make this configurable
+            let stop_retry_at = std::time::Instant::now() + Duration::from_mins(30);
             loop {
                 let deadline_on = tokio::time::Instant::now() + self.timeout_fast_time;
-                let _guard = self.mutexes_get_or_fetch.lock_mutex(m3u8.clone()).await;
-                let (segments, finished) = self
-                    .get_inner(
-                        m3u8,
-                        original_media_playlist,
-                        self.smaller_time_between_segments,
-                        Some(deadline_on),
-                    )
+                let (segments, finished_computing) = self
+                    .get_inner(m3u8, original_media_playlist, deadline_on)
                     .await?;
-                if finished || counter > 10 {
+                if finished_computing || stop_retry_at < std::time::Instant::now() {
                     break Ok(segments);
                 }
-                counter += 1;
+                // without this, it seems that the moka list for try_compute_with is not taken into account. When you chain 2 try_compute_with without yielding between them, they don't give priority to the wakers in the try_compute_with list
+                tokio::task::yield_now().await;
             }
         }
     }
