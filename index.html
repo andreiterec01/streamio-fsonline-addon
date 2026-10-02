@@ -120,7 +120,7 @@
 
         .install-btn {
             display: inline-block;
-            margin-top: 1rem;
+            margin: 1rem 0 0;
             padding: 16px 40px;
             background: #6f42c1;
             color: white;
@@ -134,6 +134,13 @@
             background: #8457da;
         }
 
+        .install-actions {
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+
         .disclaimer {
             margin-top: 1rem;
             color: #ffb347;
@@ -142,10 +149,52 @@
         }
 
         .url {
-            margin-top: 1.5rem;
-            color: #999;
+            min-width: 0;
+            color: #f0f0f0;
             font-family: monospace;
             word-break: break-all;
+            text-align: left;
+        }
+
+        .url-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            margin-top: 1.5rem;
+            padding: 1rem;
+            background: #202020;
+            border: 1px solid #444;
+            border-radius: 10px;
+        }
+
+        .copy-btn {
+            flex-shrink: 0;
+            padding: .65rem 1rem;
+            background: #3a3a3a;
+            color: white;
+            border: 0;
+            border-radius: 8px;
+            font: inherit;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .copy-btn:hover {
+            background: #505050;
+        }
+
+        .copy-btn.copied {
+            background: #218838;
+        }
+
+        .copy-btn.copy-error {
+            background: #a83232;
+        }
+
+        .copy-btn:disabled {
+            cursor: not-allowed;
+            opacity: .5;
         }
     </style>
 </head>
@@ -178,16 +227,6 @@
             </label>
             <label class="option">
                 <span class="switch">
-                    <input type="checkbox" value="2">
-                    <span class="slider"></span>
-                </span>
-                <span class="option-text">
-                    <strong>Show fsonline players</strong>
-                    <small>Expose the available fsonline players directly from the website.</small>
-                </span>
-            </label>
-            <label class="option">
-                <span class="switch">
                     <input type="checkbox" value="4">
                     <span class="slider"></span>
                 </span>
@@ -210,25 +249,56 @@
 
         <br>
 
-        <a id="installButton" class="install-btn" href="stremio://streamio.aterec.it.com/1/manifest.json">
-            Install
-        </a>
+        <div class="install-actions">
+            <a id="webInstallButton" class="install-btn"
+                href="https://web.stremio.com/#/addons?addon=https://streamio.aterec.it.com/1/manifest.json">
+                Install in stremio web
+            </a>
+            <a id="installButton" class="install-btn" href="stremio://streamio.aterec.it.com/1/manifest.json">
+                Install in the stremio app
+            </a>
+        </div>
 
-        <div class="url" id="manifestUrl">
-            stremio://streamio.aterec.it.com/0/manifest.json
+        <div class="url-row" id="manifestUrlRow">
+            <div class="url" id="manifestUrl">https://streamio.aterec.it.com/0/manifest.json</div>
+            <button class="copy-btn" id="copyUrlButton" type="button">Copy</button>
         </div>
     </div>
 
     <script>
         const checkboxes = document.querySelectorAll("input[type=checkbox]");
         const button = document.getElementById("installButton");
+        const webButton = document.getElementById("webInstallButton");
         const urlText = document.getElementById("manifestUrl");
+        const urlRow = document.getElementById("manifestUrlRow");
+        const copyButton = document.getElementById("copyUrlButton");
 
         const validation = document.createElement("div");
         validation.style.color = "#ff8080";
         validation.style.marginTop = "1rem";
         validation.textContent = "Please select at least one option.";
-        urlText.parentNode.insertBefore(validation, urlText);
+        urlRow.parentNode.insertBefore(validation, urlRow);
+
+        function resetCopyButton() {
+            copyButton.textContent = "Copy";
+            copyButton.classList.remove("copied", "copy-error");
+            copyButton.removeAttribute("title");
+        }
+
+        copyButton.addEventListener("click", async () => {
+            try {
+                await navigator.clipboard.writeText(urlText.textContent);
+                copyButton.textContent = "Copied";
+                copyButton.classList.remove("copy-error");
+                copyButton.classList.add("copied");
+                copyButton.removeAttribute("title");
+            } catch (error) {
+                copyButton.textContent = "Copy failed";
+                copyButton.classList.remove("copied");
+                copyButton.classList.add("copy-error");
+                copyButton.title = `Unable to copy URL: ${error.message}`;
+            }
+        });
 
         function updateLink() {
             let value = 0;
@@ -240,22 +310,32 @@
             });
 
             if (value === 0) {
+                copyButton.disabled = true;
                 button.removeAttribute("href");
                 button.style.opacity = "0.5";
                 button.style.pointerEvents = "none";
 
                 validation.style.display = "block";
                 urlText.textContent = "Select at least one option.";
+                webButton.removeAttribute("href");
+                webButton.style.opacity = "0.5";
+                webButton.style.pointerEvents = "none";
             } else {
-                const url = `stremio://streamio.aterec.it.com/${value}/manifest.json`;
+                copyButton.disabled = false;
+                const url = `https://streamio.aterec.it.com/${value}/manifest.json`;
 
-                button.href = url;
+                button.href = `stremio://streamio.aterec.it.com/${value}/manifest.json`;
                 button.style.opacity = "1";
                 button.style.pointerEvents = "auto";
+                webButton.href = `https://web.stremio.com/#/addons?addon=https://streamio.aterec.it.com/${value}/manifest.json`;
+                webButton.style.opacity = "1";
+                webButton.style.pointerEvents = "auto";
 
                 validation.style.display = "none";
                 urlText.textContent = url;
             }
+
+            resetCopyButton();
         }
 
         checkboxes.forEach(cb => cb.addEventListener("change", updateLink));

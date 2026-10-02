@@ -302,6 +302,9 @@ impl SubtitleFsonline {
             ("turkish.vtt", "tur", None),
             ("spanish.vtt", "spa", None),
             ("arabic.vtt", "ara", None),
+            ("serbian.vtt", "srp", None),
+            ("croatian.vtt", "hrv", None),
+            ("icelandic.vtt", "isl", None),
         ];
         let Some(last) = url.split('/').next_back() else {
             return Some(Self {

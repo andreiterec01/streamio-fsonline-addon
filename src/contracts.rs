@@ -40,7 +40,7 @@ pub struct Subtitle {
      * Language code for the subtitle, if a valid ISO 639-2 code is not sent, the text of this value will be used instead.
      */
     lang: Language,
-    // label: String,
+    label: String,
 }
 
 impl Subtitle {
@@ -55,12 +55,12 @@ impl Subtitle {
         let id = fsonline_subtitle.md5();
         Self {
             id: format!("FSonline {server_name}"),
+            label: format!("FSonline {server_name}"),
             url: format!(
                 "{protocol}://{host}/v1/api/subtitles/{imdb}/{}/subtitle.vtt",
                 id
             ),
             lang: fsonline_subtitle.lang,
-            // label: format!("FSonline {server_name}"),
         }
     }
 }
