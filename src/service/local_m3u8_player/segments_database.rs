@@ -604,9 +604,10 @@ impl LocalPlayerInner {
                             return;
                         }
 
+                        let r = tmp_file.move_to(path).await;
+                        drop(file_mutex_guard);
                         time_cache.insert(&id, &result).await;
-
-                        if let Err(e) = tmp_file.move_to(path).await {
+                        if let Err(e) = r {
                             tracing::error!("Failed to move temporary segment file: {e:?}");
                             db.delete_segment_local(imdb, &server, index)
                                 .await
@@ -618,7 +619,7 @@ impl LocalPlayerInner {
                                 .ok();
                             return;
                         }
-                        drop(file_mutex_guard);
+
                         total_file_size
                             .fetch_add(result.len() as u64, std::sync::atomic::Ordering::SeqCst);
                         //TODO: This sets for a second time the last acces time for the segment. We should only do this for the movie
