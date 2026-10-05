@@ -815,15 +815,22 @@ impl LocalPlayerInner {
 
         let movie_duration: f32 = playlist.segments.iter().map(|s| s.duration).sum();
         let segments_len = playlist.segments.len();
+        let initial_range = 0..5;
         // TODO: add the cache back
         _ = self
-            .get_segments(m3u8_key.imdb, m3u8_key.server_name.clone(), 0..1)
+            .get_segments(
+                m3u8_key.imdb,
+                m3u8_key.server_name.clone(),
+                initial_range.clone(),
+            )
             .await?;
 
-        // waiting to be added the 0 element to the cache
-        self.file_path_mutexes
-            .lock_mutex((m3u8_key.clone(), 0))
-            .await;
+        for index in initial_range {
+            // waiting to be added the 0 element to the cache
+            self.file_path_mutexes
+                .wait(&(m3u8_key.clone(), index))
+                .await;
+        }
 
         let one_segment_times = self
             .time_cache

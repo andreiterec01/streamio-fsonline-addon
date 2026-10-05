@@ -40,6 +40,7 @@ impl<K: Clone + Eq + Hash> MultipleValueMutex<K> {
         }
     }
 
+    #[must_use = "the returned guard must be held until the critical section is complete. If you just want to wait until the mutex is available, use `wait` instead."]
     pub(crate) async fn lock_mutex(&self, key: K) -> RemoveOnDropGuardOwned<K> {
         let value = match self.active_mutexes.entry(key) {
             dashmap::Entry::Occupied(mut entry) => match entry.get().upgrade() {
@@ -66,5 +67,15 @@ impl<K: Clone + Eq + Hash> MultipleValueMutex<K> {
         };
 
         value.lock_owned().await
+    }
+
+    pub(crate) async fn wait(&self, key: &K) {
+        let Some(v) = self.active_mutexes.get(&key) else {
+            return;
+        };
+        let Some(v) = v.upgrade() else {
+            return;
+        };
+        v.lock_owned().await;
     }
 }
