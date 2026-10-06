@@ -70,12 +70,15 @@ impl<K: Clone + Eq + Hash> MultipleValueMutex<K> {
     }
 
     pub(crate) async fn wait(&self, key: &K) {
-        let Some(v) = self.active_mutexes.get(&key) else {
-            return;
+        let value = {
+            let Some(v) = self.active_mutexes.get(&key) else {
+                return;
+            };
+            let Some(v) = v.upgrade() else {
+                return;
+            };
+            v
         };
-        let Some(v) = v.upgrade() else {
-            return;
-        };
-        v.lock_owned().await;
+        value.lock_owned().await;
     }
 }
