@@ -504,8 +504,6 @@ impl LocalPlayerInner {
         imdb: Imdb,
         server: Arc<str>,
         segment_range: std::ops::Range<usize>,
-        // TODO: implement content_range
-        // content_range: Option<std::ops::Range<u64>>,
     ) -> anyhow::Result<SegmentsContent> {
         let segment_files = segment_range.map(async |index| {
             let path = Self::movie_file_path(&self.cache_directory, imdb, &server, index);
@@ -873,14 +871,18 @@ impl LocalPlayerInner {
             .get(segment_id.segment_index)
             .context("Invalid segment index")?;
 
-        let segment_data = self
-            .client
-            .get(&segment.uri)
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
+        let send_response = self.client.get(&segment.uri).send().await;
+        if let Err(e) = &send_response
+            && (e.is_timeout() || e.is_connect())
+        {
+            tracing::warn!(
+                "Failed to download segment {segment_id:?}: {e:?}. Deleting the entry from the database so it will be refetched next time"
+            );
+            self.imdb_to_video_service
+                .delete_entry(&segment_id.m3u8.imdb)
+                .await;
+        }
+        let segment_data = send_response?.error_for_status()?.bytes().await?;
 
         Ok(segment_data)
     }

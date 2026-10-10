@@ -93,6 +93,10 @@ impl VideoServer {
         })
     }
 
+    pub async fn delete(&self, imdb: &Imdb) {
+        self.cache.invalidate(imdb).await;
+    }
+
     pub async fn get(&self, imdb: Imdb, key: &MovieKey) -> anyhow::Result<VideoServerResponse> {
         let MovieKey { movie, data } = key;
         let movie = normalize_movie_name(movie);

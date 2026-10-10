@@ -10,10 +10,7 @@ use serde::Deserialize;
 use crate::{
     AppState, UsesHttps,
     contracts::Imdb,
-    custom_extractor::{
-        DontLogResponse,
-        axum_range::{RangeBody, Ranged},
-    },
+    custom_extractor::{DontLogResponse, axum_range::Ranged},
     error::WebResult,
     service::local_m3u8_player::{
         M3U8CacheKey, file_or_content::StreamFileOrBytes, segments_database::LocalPlayer,
@@ -117,12 +114,6 @@ async fn m3u8_segment(
     Path(path): Path<SegmentRequest>,
     range: Option<TypedHeader<axum_extra::headers::Range>>,
 ) -> WebResult<DontLogResponse<(HeaderMap, Ranged<StreamFileOrBytes>)>> {
-    // let mut segments = Vec::new();
-    // let m3u8 = M3U8CacheKey {
-    //     imdb: path.imdb,
-    //     server_name: path.server_name.into(),
-    // };
-
     let results = local_player
         .get_segments(
             path.imdb,
@@ -132,20 +123,10 @@ async fn m3u8_segment(
         .await?;
 
     let body = results.into_stream();
-    // for index in path.segment_start..path.segment_end {
-    //     let id = SegmentId {
-    //         m3u8: m3u8.clone(),
-    //         segment_index: index,
-    //     };
-    //     let content = local_player.get_segment(id, true).await?;
-    //     segments.push(content);
-    // }
+
     let mut headers = HeaderMap::new();
     headers.insert(hyper::header::CONTENT_TYPE, "video/MP2T".parse().unwrap());
-    // headers.insert(
-    //     hyper::header::CONTENT_LENGTH,
-    //     len.to_string().parse().unwrap(),
-    // );
+
     let body = Ranged::new(range.map(|r| r.0), body);
     Ok(DontLogResponse((headers, body)))
 }

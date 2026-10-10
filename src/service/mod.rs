@@ -98,4 +98,8 @@ impl ImdbToVideoServer {
             .cloned();
         Ok(player)
     }
+
+    pub async fn delete_entry(&self, imdb_id: &Imdb) {
+        self.video_service.delete(imdb_id).await;
+    }
 }
