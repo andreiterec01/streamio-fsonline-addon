@@ -171,7 +171,7 @@ impl VideoServer {
                     if let Some(playlist) = &player.data.video {
                         let m3u8_key = M3U8CacheKey {
                             imdb,
-                            server_name: player.server_name.clone().into(),
+                            server_name: player.server_name.clone(),
                         };
                         self.new_metadata.push((m3u8_key, playlist.clone()));
                     }

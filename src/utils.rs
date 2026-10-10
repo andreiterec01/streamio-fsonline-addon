@@ -71,7 +71,7 @@ impl<K: Clone + Eq + Hash> MultipleValueMutex<K> {
 
     pub(crate) async fn wait(&self, key: &K) {
         let value = {
-            let Some(v) = self.active_mutexes.get(&key) else {
+            let Some(v) = self.active_mutexes.get(key) else {
                 return;
             };
             let Some(v) = v.upgrade() else {

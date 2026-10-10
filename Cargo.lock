@@ -1031,6 +1031,7 @@ dependencies = [
  "dashmap",
  "dotenvy",
  "futures",
+ "http-body",
  "hyper",
  "itertools",
  "m3u8-rs",
@@ -1038,6 +1039,7 @@ dependencies = [
  "moka",
  "mpeg2ts-reader",
  "mut-binary-heap",
+ "pin-project",
  "regex",
  "reqwest",
  "scopeguard",
@@ -2043,6 +2045,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
 dependencies = [
  "siphasher",
+]
+
+[[package]]
+name = "pin-project"
+version = "1.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2466b2336ed02bcdca6b294417127b90ec92038d1d5c4fbeac971a922e0e0924"
+dependencies = [
+ "pin-project-internal",
+]
+
+[[package]]
+name = "pin-project-internal"
+version = "1.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c96395f0a926bc13b1c17622aaddda1ecb55d49c8f1bf9777e4d877800a43f8b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

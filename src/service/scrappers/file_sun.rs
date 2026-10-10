@@ -87,7 +87,7 @@ impl FileSuNParser {
             subtitles_result.extend(subtitles);
         }
         VideoAndSubtitlesScrapper {
-            m3u8_url: m3u8_url.map(|url| url.into()),
+            m3u8_url,
             subtitles: subtitles_result.into(),
         }
     }

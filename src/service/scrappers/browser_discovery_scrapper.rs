@@ -75,7 +75,7 @@ impl scrappers::PlayerScrapper for BrowserDiscovery {
                     };
                     if last_part == "master.m3u8" {
                         let was_empty = m3u8_url.is_none();
-                        m3u8_url = Some(url.to_string().into());
+                        m3u8_url = Some(url.to_string());
                         if was_empty && !subtitles.is_empty() {
                             // if we have everything, wait only another 0.2 seconds to make sure we get all the subtitles
                             elapsed_at = tokio::time::Instant::now() + Duration::from_secs_f32(0.2);

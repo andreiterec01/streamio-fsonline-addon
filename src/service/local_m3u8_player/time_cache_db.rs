@@ -308,7 +308,7 @@ impl TimeCache {
                     segments_len,
                     movie_duration,
                     times.iter().cloned(),
-                    result.dont_compute.into_iter().copied()
+                    result.dont_compute.iter().copied()
                 );
                 finished_computing = intervals.next_best_to_split().is_none();
                 while let Some(next_interval) = intervals.next_best_to_split()

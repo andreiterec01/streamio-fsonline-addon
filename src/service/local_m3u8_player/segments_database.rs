@@ -1,6 +1,5 @@
 use std::{
     path::{Path, PathBuf},
-    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64},
@@ -9,7 +8,7 @@ use std::{
 
 use anyhow::Context;
 use bytes::Bytes;
-use futures::{Stream, StreamExt, TryStreamExt, future::try_join_all};
+use futures::{Stream, TryStreamExt, future::try_join_all};
 use itertools::Itertools;
 use m3u8_rs::MediaPlaylist;
 use sqlx::sqlite::SqliteConnectOptions;
@@ -20,6 +19,7 @@ use crate::{
         ImdbToVideoServer, MediaPlaylistQueue, PlaylistInfoMetadata, SegmentInfo,
         local_m3u8_player::{
             M3U8CacheKey, OneSegmentTime, SegmentId, SegmentsTime,
+            file_or_content::{FileOrBytes, StreamFileOrBytes},
             populate_cache::LoadCacheRequest,
             time_cache_db::{self, TimeCache, TimeCacheOptions},
         },
@@ -341,9 +341,15 @@ impl Drop for DeleteFileOnDrop {
     }
 }
 
-pub struct SegmentsContent<S> {
-    pub stream: S,
+pub struct SegmentsContent {
+    pub stream: Vec<FileOrBytes>,
     pub len: u64,
+}
+
+impl SegmentsContent {
+    pub(crate) fn into_stream(self) -> StreamFileOrBytes {
+        StreamFileOrBytes::new(self.stream.into(), self.len)
+    }
 }
 
 pub struct NewLocalPlayerOptions {
@@ -367,11 +373,7 @@ impl LocalPlayer {
         imdb: Imdb,
         server: Arc<str>,
         segment_range: std::ops::Range<usize>,
-    ) -> anyhow::Result<
-        SegmentsContent<
-            impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + 'static,
-        >,
-    > {
+    ) -> anyhow::Result<SegmentsContent> {
         let end = segment_range.end;
         self.load_cache_sender
             .send(LoadCacheRequest {
@@ -504,11 +506,7 @@ impl LocalPlayerInner {
         segment_range: std::ops::Range<usize>,
         // TODO: implement content_range
         // content_range: Option<std::ops::Range<u64>>,
-    ) -> anyhow::Result<
-        SegmentsContent<
-            impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + 'static,
-        >,
-    > {
+    ) -> anyhow::Result<SegmentsContent> {
         let segment_files = segment_range.map(async |index| {
             let path = Self::movie_file_path(&self.cache_directory, imdb, &server, index);
 
@@ -527,18 +525,6 @@ impl LocalPlayerInner {
                 Ok(file) => {
                     // TODO: a query to the database should be faster to compute the len
                     let len = file.metadata().await?.len();
-                    let stream = tokio_util::codec::FramedRead::new(
-                        file,
-                        tokio_util::codec::BytesCodec::new(),
-                    )
-                    .map_ok(bytes::BytesMut::freeze);
-                    let stream = Box::pin(stream)
-                        as Pin<
-                            Box<
-                                dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>>
-                                    + Send,
-                            >,
-                        >;
                     let db = self.db.clone();
                     let server = server.clone();
                     // TODO: when we add a cache for the segments, we should also move this to the eviction listener, keeping the tokio::spawn
@@ -548,7 +534,7 @@ impl LocalPlayerInner {
                         }
                     });
 
-                    Ok((stream, len))
+                    Ok(FileOrBytes::File { file, len })
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     let segment_id = SegmentId {
@@ -627,25 +613,18 @@ impl LocalPlayerInner {
                             tracing::error!("Failed to set last acces time: {e:?}");
                         }
                     });
-                    let len = result_clone.len() as u64;
-                    let stream =
-                        Box::pin(futures::stream::iter([std::io::Result::Ok(result_clone)]))
-                            as Pin<
-                                Box<
-                                    dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>>
-                                        + Send,
-                                >,
-                            >;
-                    Ok((stream, len))
+
+                    Ok(FileOrBytes::Bytes(result_clone))
                 }
                 Err(e) => Err(e).context("Failed to open segment file"),
             }
         });
         let segment_files = try_join_all(segment_files).await?;
-        let len = segment_files.iter().map(|(_, len)| len).sum();
-        let stream =
-            futures::stream::iter(segment_files.into_iter().map(|(stream, _)| stream)).flatten();
-        Ok(SegmentsContent { stream, len })
+        let len = segment_files.iter().map(|segment| segment.len()).sum();
+        Ok(SegmentsContent {
+            stream: segment_files,
+            len,
+        })
     }
 
     // TODO: finish this function and call it in get_segments

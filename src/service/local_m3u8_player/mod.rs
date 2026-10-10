@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+pub(crate) mod file_or_content;
 mod intervals;
 mod populate_cache;
 pub mod segments_database;

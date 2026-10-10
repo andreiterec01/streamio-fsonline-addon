@@ -2,6 +2,7 @@ use axum::{
     Router,
     extract::{Path, State},
 };
+use axum_extra::TypedHeader;
 use hyper::HeaderMap;
 use m3u8_rs::{MediaPlaylist, MediaSegment};
 use serde::Deserialize;
@@ -9,9 +10,14 @@ use serde::Deserialize;
 use crate::{
     AppState, UsesHttps,
     contracts::Imdb,
-    custom_extractor::DontLogResponse,
+    custom_extractor::{
+        DontLogResponse,
+        axum_range::{RangeBody, Ranged},
+    },
     error::WebResult,
-    service::local_m3u8_player::{M3U8CacheKey, segments_database::LocalPlayer},
+    service::local_m3u8_player::{
+        M3U8CacheKey, file_or_content::StreamFileOrBytes, segments_database::LocalPlayer,
+    },
 };
 
 pub(super) fn routes() -> Router<AppState> {
@@ -109,8 +115,8 @@ async fn m3u8_playlist(
 async fn m3u8_segment(
     local_player: State<LocalPlayer>,
     Path(path): Path<SegmentRequest>,
-    // range: Option<TypedHeader<axum_extra::headers::Range>>,
-) -> WebResult<DontLogResponse<(HeaderMap, axum::body::Body)>> {
+    range: Option<TypedHeader<axum_extra::headers::Range>>,
+) -> WebResult<DontLogResponse<(HeaderMap, Ranged<StreamFileOrBytes>)>> {
     // let mut segments = Vec::new();
     // let m3u8 = M3U8CacheKey {
     //     imdb: path.imdb,
@@ -125,7 +131,7 @@ async fn m3u8_segment(
         )
         .await?;
 
-    let body = axum::body::Body::from_stream(results.stream);
+    let body = results.into_stream();
     // for index in path.segment_start..path.segment_end {
     //     let id = SegmentId {
     //         m3u8: m3u8.clone(),
@@ -136,9 +142,10 @@ async fn m3u8_segment(
     // }
     let mut headers = HeaderMap::new();
     headers.insert(hyper::header::CONTENT_TYPE, "video/MP2T".parse().unwrap());
-    headers.insert(
-        hyper::header::CONTENT_LENGTH,
-        results.len.to_string().parse().unwrap(),
-    );
+    // headers.insert(
+    //     hyper::header::CONTENT_LENGTH,
+    //     len.to_string().parse().unwrap(),
+    // );
+    let body = Ranged::new(range.map(|r| r.0), body);
     Ok(DontLogResponse((headers, body)))
 }

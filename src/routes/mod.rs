@@ -11,7 +11,7 @@ use tower_http::services::ServeFile;
 use crate::{
     AppState, UsesHttps,
     contracts::{Imdb, OptionsBytes, Subtitle},
-    custom_extractor::axum_range::Ranged,
+    custom_extractor::axum_range::{BytesRangeBody, Ranged},
     error::WebResult,
     service::{
         ImdbToVideoServer,
@@ -266,7 +266,7 @@ async fn redirect_subtitles(
 ) -> WebResult<(
     hyper::HeaderMap,
     // StreamMapper<impl futures::stream::Stream<Item = std::io::Result<axum::body::Bytes>>>,
-    Ranged,
+    Ranged<BytesRangeBody>,
 )> {
     let r = movie.get(imdb).await?;
 
@@ -290,7 +290,7 @@ async fn redirect_subtitles(
         .map_err(anyhow::Error::from)?;
 
     let response = axum::body::Bytes::from(response);
-    let response = vec![response];
+    let response = BytesRangeBody(response);
     let range = range.map(|TypedHeader(range)| range);
 
     let headers: hyper::HeaderMap = [(

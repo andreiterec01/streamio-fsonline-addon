@@ -144,7 +144,7 @@ impl Imdb {
         self.series_data.is_some()
     }
 
-    pub fn to_u64(&self) -> u64 {
+    pub fn to_u64(self) -> u64 {
         (self.imdb_id as u64) << 32
             | self
                 .series_data

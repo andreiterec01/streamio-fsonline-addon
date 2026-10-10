@@ -140,7 +140,7 @@ impl LocalPlayerInner {
                 )
                 .await
             {
-                Ok(stream) => stream,
+                Ok(stream) => stream.into_stream(),
                 Err(e) => {
                     tracing::error!("Error getting segments: {:?}", e);
                     continue;
@@ -148,7 +148,7 @@ impl LocalPlayerInner {
             };
             let mut ts = ts_parser::TsTimeParser::new(false);
             loop {
-                let bytes = match stream.stream.try_next().await {
+                let bytes = match stream.try_next().await {
                     Ok(Some(bytes)) => bytes,
                     Ok(None) => break,
                     Err(e) => {
