@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::TryStreamExt;
-use mut_binary_heap::MaxComparator;
+use mut_binary_heap::{BinaryHeap, MinComparator};
 
 use crate::{
     service::{
@@ -48,7 +48,7 @@ impl MovieData {
         let Some(newest) = self.get_next_compute_inner(index) else {
             return Some(NextResult {
                 next_index: index,
-                time_taken: Duration::from_secs(0),
+                time_taken: Duration::ZERO,
             });
         };
 
@@ -71,6 +71,59 @@ impl MovieData {
 
 pub struct LoadCacheRequest {
     pub(crate) segment_id: SegmentId,
+    pub(crate) cache_in_the_future: Duration,
+}
+
+#[derive(Clone)]
+pub struct HeapEntry {
+    duration_in_future: Duration,
+    total_duration: Duration,
+}
+
+impl PartialEq for HeapEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.duration_in_future == other.duration_in_future
+    }
+}
+
+impl Eq for HeapEntry {}
+
+impl PartialOrd for HeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HeapEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.duration_in_future.cmp(&other.duration_in_future)
+    }
+}
+
+fn add_to_cache(
+    heap: &mut BinaryHeap<SegmentId, HeapEntry, MinComparator>,
+    segment_id: SegmentId,
+    entry: HeapEntry,
+) {
+    if let Some(mut old_entry) = heap.get_mut(&segment_id) {
+        let (smaller_entry, mut bigger_entry) = if entry < *old_entry {
+            (entry, old_entry.clone())
+        } else {
+            (old_entry.clone(), entry)
+        };
+
+        let in_future_diff = bigger_entry.duration_in_future - smaller_entry.duration_in_future;
+        bigger_entry.duration_in_future = smaller_entry.duration_in_future;
+        bigger_entry.total_duration -= in_future_diff;
+        let entry = if smaller_entry.total_duration > bigger_entry.total_duration {
+            smaller_entry
+        } else {
+            bigger_entry
+        };
+        *old_entry = entry;
+        return;
+    }
+    heap.push(segment_id, entry);
 }
 
 impl LocalPlayerInner {
@@ -78,23 +131,50 @@ impl LocalPlayerInner {
         self: Arc<Self>,
         mut requests: tokio::sync::mpsc::UnboundedReceiver<LoadCacheRequest>,
     ) {
-        let mut heap = mut_binary_heap::BinaryHeap::<SegmentId, Duration, MaxComparator>::new();
+        let mut heap = mut_binary_heap::BinaryHeap::<SegmentId, HeapEntry, MinComparator>::new();
 
         let mut mini =
-            small_cache::SmallCache::<M3U8CacheKey, MovieData>::new(Duration::from_secs(15 * 60));
+            small_cache::SmallCache::<M3U8CacheKey, MovieData>::new(Duration::from_mins(15));
         'a: loop {
-            while let Ok(LoadCacheRequest { segment_id }) = requests.try_recv() {
-                heap.push(segment_id, self.cache_in_the_future);
+            while let Ok(LoadCacheRequest {
+                segment_id,
+                cache_in_the_future,
+            }) = requests.try_recv()
+            {
+                add_to_cache(
+                    &mut heap,
+                    segment_id,
+                    HeapEntry {
+                        duration_in_future: Duration::ZERO,
+                        total_duration: cache_in_the_future,
+                    },
+                );
             }
-            let (mut segment_id, mut time_remaining) =
-                if let Some((segment_id, time_remaining)) = heap.pop_with_key() {
-                    (segment_id, time_remaining)
-                } else {
-                    let Some(LoadCacheRequest { segment_id }) = requests.recv().await else {
-                        return;
-                    };
-                    (segment_id, self.cache_in_the_future)
+            let (
+                mut segment_id,
+                HeapEntry {
+                    mut duration_in_future,
+                    total_duration,
+                },
+            ) = if let Some(entry) = heap.pop_with_key() {
+                entry
+            } else {
+                let Some(LoadCacheRequest {
+                    segment_id,
+                    cache_in_the_future,
+                }) = requests.recv().await
+                else {
+                    return;
                 };
+
+                (
+                    segment_id,
+                    HeapEntry {
+                        duration_in_future: Duration::ZERO,
+                        total_duration: cache_in_the_future,
+                    },
+                )
+            };
 
             let Some(segments_count) = self
                 .get_m3u8(&segment_id.m3u8)
@@ -123,13 +203,28 @@ impl LocalPlayerInner {
                 continue;
             };
             tracing::debug!(
-                "Next compute for segment: {:?}, next_index: {}, time_taken: {:.2}",
+                "Next compute for segment: {:?}, next_index: {}, time_taken: {:.2}, already_computed_in_future: {:.2}",
                 segment_id,
                 compute_next.next_index,
-                compute_next.time_taken.as_secs_f64()
+                compute_next.time_taken.as_secs_f64(),
+                duration_in_future.as_secs_f64()
             );
-            time_remaining = time_remaining.saturating_sub(compute_next.time_taken);
-            if time_remaining.is_zero() {
+            duration_in_future += compute_next.time_taken;
+            if duration_in_future >= total_duration {
+                continue;
+            }
+            if !compute_next.time_taken.is_zero() {
+                segment_id.segment_index = compute_next.next_index;
+
+                add_to_cache(
+                    &mut heap,
+                    segment_id,
+                    HeapEntry {
+                        duration_in_future,
+                        total_duration,
+                    },
+                );
+
                 continue;
             }
             let mut stream = match self
@@ -168,13 +263,23 @@ impl LocalPlayerInner {
                 } as f64;
             let duration = Duration::from_secs_f64(duration);
             times.insert(compute_next.next_index, duration);
-            time_remaining = time_remaining.saturating_sub(duration);
-            if time_remaining.is_zero() {
+            duration_in_future += duration;
+            if duration_in_future >= total_duration {
                 continue;
             }
-            segment_id.segment_index = compute_next.next_index;
+            segment_id.segment_index = compute_next.next_index + 1;
+            if segment_id.segment_index >= segments_count {
+                continue;
+            }
 
-            heap.push(segment_id, time_remaining);
+            add_to_cache(
+                &mut heap,
+                segment_id,
+                HeapEntry {
+                    duration_in_future,
+                    total_duration,
+                },
+            );
         }
     }
 }

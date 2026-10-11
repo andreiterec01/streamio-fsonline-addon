@@ -170,6 +170,7 @@ async fn series_function(
         let local_player_service = local_player_service.clone();
 
         tokio::spawn(async move {
+            local_player_service.load_initial_segments(imdb_id, server_name.clone());
             // TODO: make the 60 seconds configurable
             match local_player_service
                 .compute_m3u8_real_segments_duration(

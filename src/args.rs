@@ -37,4 +37,9 @@ pub struct Args {
     pub(crate) metadata_cache_time_to_live: u64,
     #[clap(long, env, default_value_t = 60*20)]
     pub(crate) metadata_cache_time_to_idle: u64,
+
+    #[clap(long, env, default_value_t = 30)]
+    pub(crate) cache_in_the_future_min: u64,
+    #[clap(long, env, default_value_t = 5)]
+    pub(crate) initial_cache_in_the_future_min: u64,
 }

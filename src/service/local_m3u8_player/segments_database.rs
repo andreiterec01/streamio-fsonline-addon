@@ -358,6 +358,9 @@ pub struct NewLocalPlayerOptions {
 
     pub new_media_playlist: MediaPlaylistQueue,
     pub time_cache_options: TimeCacheOptions,
+
+    pub cache_in_the_future: std::time::Duration,
+    pub initial_cache_in_the_future: std::time::Duration,
 }
 
 #[derive(Clone)]
@@ -375,6 +378,27 @@ impl LocalPlayer {
         segment_range: std::ops::Range<usize>,
     ) -> anyhow::Result<SegmentsContent> {
         let end = segment_range.end;
+
+        let r = self
+            .inner
+            .get_segments(imdb, server.clone(), segment_range)
+            .await;
+        self.load_cache_sender
+            .send(LoadCacheRequest {
+                segment_id: SegmentId {
+                    m3u8: M3U8CacheKey {
+                        imdb,
+                        server_name: server,
+                    },
+                    segment_index: end,
+                },
+                cache_in_the_future: self.inner.cache_in_the_future,
+            })
+            .ok();
+        r
+    }
+
+    pub fn load_initial_segments(&self, imdb: Imdb, server: Arc<str>) {
         self.load_cache_sender
             .send(LoadCacheRequest {
                 segment_id: SegmentId {
@@ -382,11 +406,11 @@ impl LocalPlayer {
                         imdb,
                         server_name: server.clone(),
                     },
-                    segment_index: end,
+                    segment_index: 0,
                 },
+                cache_in_the_future: self.inner.initial_cache_in_the_future,
             })
             .ok();
-        self.inner.get_segments(imdb, server, segment_range).await
     }
 
     pub async fn compute_m3u8_real_segments_duration(
@@ -415,6 +439,8 @@ pub struct LocalPlayerInner {
     max_total_file_size: u64,
 
     pub(super) cache_in_the_future: std::time::Duration,
+    /// how much we should cache in the future for the first request
+    pub(super) initial_cache_in_the_future: std::time::Duration,
 
     new_media_playlist: MediaPlaylistQueue,
 }
@@ -428,6 +454,8 @@ impl LocalPlayer {
             max_total_file_size,
             time_cache_options,
             new_media_playlist,
+            cache_in_the_future,
+            initial_cache_in_the_future,
         }: NewLocalPlayerOptions,
     ) -> anyhow::Result<Self> {
         tokio::fs::create_dir_all(&cache_directory).await?;
@@ -448,7 +476,8 @@ impl LocalPlayer {
             max_total_file_size,
             total_file_size: Arc::new(AtomicU64::new(total_file_size)),
             cache_directory: cache_directory.into(),
-            cache_in_the_future: std::time::Duration::from_secs(15 * 60),
+            cache_in_the_future,
+            initial_cache_in_the_future,
             new_media_playlist,
         };
         inner.check_and_start_cleanup_if_needed(0);
@@ -792,7 +821,7 @@ impl LocalPlayerInner {
 
         let movie_duration: f32 = playlist.segments.iter().map(|s| s.duration).sum();
         let segments_len = playlist.segments.len();
-        let initial_range = 0..5;
+        let initial_range = 0..2;
         // TODO: add the cache back
         _ = self
             .get_segments(

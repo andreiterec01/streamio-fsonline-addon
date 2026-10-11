@@ -114,6 +114,8 @@ async fn main() -> anyhow::Result<()> {
             max_total_file_size: 1024 * 1024 * args.file_segments_cache_size_mb,
             time_cache_options,
             new_media_playlist,
+            cache_in_the_future: Duration::from_mins(args.cache_in_the_future_min),
+            initial_cache_in_the_future: Duration::from_mins(args.initial_cache_in_the_future_min),
         };
 
     let local_player = LocalPlayer::new(
