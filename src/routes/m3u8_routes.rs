@@ -51,9 +51,7 @@ async fn create_new_playlist(
     key: &M3U8CacheKey,
     original_playlist: &MediaPlaylist,
 ) -> anyhow::Result<MediaPlaylist> {
-    let segments_data = player
-        .compute_m3u8_real_segments_duration(key, true)
-        .await?;
+    let segments_data = player.compute_m3u8_real_segments_duration(key).await?;
     let mut playlist = original_playlist.clone();
 
     playlist.segments.clear();

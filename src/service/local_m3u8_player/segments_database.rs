@@ -416,11 +416,14 @@ impl LocalPlayer {
     pub async fn compute_m3u8_real_segments_duration(
         &self,
         m3u8_key: &M3U8CacheKey,
-        with_timeout: bool,
     ) -> anyhow::Result<Vec<SegmentsTime>> {
         self.inner
-            .compute_m3u8_real_segments_duration(m3u8_key, with_timeout)
+            .compute_m3u8_real_segments_duration(m3u8_key)
             .await
+    }
+
+    pub async fn compute_time_in_background(&self, m3u8_key: &M3U8CacheKey) -> anyhow::Result<()> {
+        self.inner.compute_time_in_background(m3u8_key).await
     }
 }
 
@@ -812,10 +815,17 @@ impl LocalPlayerInner {
         Ok(playlist)
     }
 
+    pub async fn compute_time_in_background(&self, m3u8_key: &M3U8CacheKey) -> anyhow::Result<()> {
+        let playlist = self.get_m3u8(m3u8_key).await?;
+        self.time_cache
+            .slow_fetch_times(m3u8_key, &playlist)
+            .await?;
+        Ok(())
+    }
+
     pub async fn compute_m3u8_real_segments_duration(
         &self,
         m3u8_key: &M3U8CacheKey,
-        with_timeout: bool,
     ) -> anyhow::Result<Vec<SegmentsTime>> {
         let playlist = self.get_m3u8(m3u8_key).await?;
 
@@ -840,7 +850,7 @@ impl LocalPlayerInner {
 
         let one_segment_times = self
             .time_cache
-            .get_or_fetch(m3u8_key, &playlist, with_timeout)
+            .get_or_fetch(m3u8_key.clone(), playlist.clone())
             .await?;
 
         let mut segments = Vec::new();

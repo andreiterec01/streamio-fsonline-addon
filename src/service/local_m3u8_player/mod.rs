@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt::Display, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 pub(crate) mod file_or_content;
@@ -18,6 +18,12 @@ pub struct SegmentId {
 pub struct M3U8CacheKey {
     pub imdb: Imdb,
     pub server_name: Arc<str>,
+}
+
+impl Display for M3U8CacheKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.imdb, self.server_name)
+    }
 }
 
 impl M3U8CacheKey {

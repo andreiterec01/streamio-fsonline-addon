@@ -173,13 +173,10 @@ async fn series_function(
             local_player_service.load_initial_segments(imdb_id, server_name.clone());
             // TODO: make the 60 seconds configurable
             match local_player_service
-                .compute_m3u8_real_segments_duration(
-                    &M3U8CacheKey {
-                        imdb: imdb_id,
-                        server_name: server_name.clone(),
-                    },
-                    false,
-                )
+                .compute_time_in_background(&M3U8CacheKey {
+                    imdb: imdb_id,
+                    server_name: server_name.clone(),
+                })
                 .await
             {
                 Ok(_) => {
