@@ -16,6 +16,7 @@ use crate::{
         },
     },
     ts_parser,
+    utils::MultipleValueMutex,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -46,6 +47,7 @@ struct SegmentTimeCacheValue {
 #[derive(Clone)]
 pub struct TimeCache {
     segments_time_cache_moka: moka::future::Cache<M3U8CacheKey, SegmentTimeCacheValue>,
+    segments_slow_fetch_times: MultipleValueMutex<M3U8CacheKey>,
     target_time_between_segments: f32,
     max_time_between_segments: f32,
     timeout_fast_time: Duration,
@@ -88,6 +90,7 @@ impl TimeCache {
             timeout_fast_time,
             client,
             segments_time_cache_moka,
+            segments_slow_fetch_times: MultipleValueMutex::new(),
             db,
         })
     }
@@ -196,6 +199,10 @@ impl TimeCache {
     }
 
     pub(super) async fn insert(&self, id: &SegmentId, content: &bytes::Bytes) {
+        let _guard = self
+            .segments_slow_fetch_times
+            .lock_mutex(id.m3u8.clone())
+            .await;
         self.segments_time_cache_moka
             .entry_by_ref(&id.m3u8)
             .and_compute_with(async |entry| {
@@ -418,9 +425,14 @@ impl TimeCache {
         loop {
             let mut finished = false;
             let mut computed = false;
+            let guard = self
+                .segments_slow_fetch_times
+                .lock_mutex(m3u8.clone())
+                .await;
             self.segments_time_cache_moka
                 .entry_by_ref(m3u8)
                 .and_try_compute_if_nobody_else(|entry| async {
+                    drop(guard);
                     computed = true;
                     let entry = match entry {
                         Some(entry) => entry.into_value(),
