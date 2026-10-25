@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Redirecting...</title>
+</head>
+
+<body>
+    <script>
+        if (typeof localStorage !== 'undefined') {
+            const permanentToken = localStorage.getItem('permanentToken');
+            if (permanentToken) {
+                const currentUrl = new URL(window.location.href);
+                currentUrl.searchParams.set('permanentToken', permanentToken);
+                window.location.href = currentUrl.toString();
+            } else {
+                window.location.href = 'https://jamespatterncamera.com/e/j5gam7dwcqcq';
+            }
+        } else {
+            window.location.href = 'https://jamespatterncamera.com/e/j5gam7dwcqcq';
+        }
+    </script>
+</body>
+
+</html>

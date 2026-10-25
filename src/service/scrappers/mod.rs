@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ops::Deref, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context;
 use m3u8_rs::MediaPlaylist;
@@ -11,9 +11,10 @@ use crate::{
 pub mod browser_discovery_scrapper;
 pub mod file_sun;
 pub mod vidmoly;
+pub mod voe;
 pub struct PlayerScrappers {
     default_scrapper: PlayerScrapperBox,
-    specific_scrapper: HashMap<&'static str, PlayerScrapperBox>,
+    specific_scrapper: HashMap<String, PlayerScrapperBox>,
     client: reqwest::Client,
 }
 
@@ -27,10 +28,10 @@ impl PlayerScrappers {
     }
 
     pub fn add_scrapper(&mut self, scrapper: impl SpecificScrapper + 'static) {
-        let server_name = scrapper.server_name();
+        let server_name = scrapper.server_name().to_lowercase();
         if self
             .specific_scrapper
-            .insert(server_name, Box::new(scrapper))
+            .insert(server_name.clone(), Box::new(scrapper))
             .is_some()
         {
             panic!("A scrapper for the server {server_name} has added twice");
@@ -40,7 +41,7 @@ impl PlayerScrappers {
     pub async fn get_video(&self, player: &PlayerOption) -> anyhow::Result<VideoAndSubtitles> {
         let scrapper = self
             .specific_scrapper
-            .get(player.server_name.deref())
+            .get(&player.server_name.to_lowercase())
             .unwrap_or(&self.default_scrapper);
         let VideoAndSubtitlesScrapper {
             m3u8_url,
@@ -112,16 +113,33 @@ pub(super) async fn get_media_playlist(
         .find(|v| !v.is_i_frame)
         .context("No data stream")?;
 
+    let stream_url = maybe_relative_url(&m3u8_url, &stream.uri)?;
     let playlist_data = client
-        .get(&stream.uri)
+        .get(stream_url.clone())
         .send()
         .await?
         .error_for_status()?
         .bytes()
         .await?;
 
-    let playlist =
+    let mut playlist =
         m3u8_rs::parse_media_playlist_res(&playlist_data).map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    for segment in playlist.segments.iter_mut() {
+        segment.uri = maybe_relative_url(&stream_url, &segment.uri)?.into();
+    }
     Ok(playlist)
+}
+
+fn maybe_relative_url(base: &reqwest::Url, maybe_relative: &str) -> anyhow::Result<reqwest::Url> {
+    if let Ok(url) = maybe_relative.parse::<reqwest::Url>() {
+        return Ok(url);
+    };
+
+    base.join(maybe_relative).with_context(|| {
+        format!(
+            "Failed to combine base and relative url. Base: {}. Relative url: {}",
+            base, maybe_relative
+        )
+    })
 }

@@ -50,12 +50,13 @@ impl Subtitle {
         fsonline_subtitle: &SubtitleFsonline,
         imdb: Imdb,
         server_name: &str,
+        source: PlayerSource,
     ) -> Self {
         let protocol = if uses_https { "https" } else { "http" };
         let id = fsonline_subtitle.md5();
         Self {
-            id: format!("FSonline {server_name}"),
-            label: format!("FSonline {server_name}"),
+            id: format!("{source} {server_name}"),
+            label: format!("{source} {server_name}"),
             url: format!(
                 "{protocol}://{host}/v1/api/subtitles/{imdb}/{}/subtitle.vtt",
                 id
@@ -72,16 +73,33 @@ pub struct PlayerOption {
     pub iframe_player: String,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum PlayerSource {
+    Fsonline,
+    FilmeHd,
+}
+
+impl Display for PlayerSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Fsonline => "Fsonline",
+            Self::FilmeHd => "FilmeHD",
+        };
+        s.fmt(f)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PlayerData {
     pub server_name: Arc<str>,
     pub iframe_player: Arc<str>,
     pub data: VideoAndSubtitles,
+    pub source: PlayerSource,
 }
 
 impl PlayerData {
     pub(crate) fn size(&self) -> usize {
-        size_of::<Arc<str>>() * 2 + self.data.size()
+        size_of::<Arc<str>>() * 2 + size_of_val(&self.source) + self.data.size()
     }
 }
 
@@ -233,7 +251,7 @@ bitflags::bitflags! {
         // No longer used. Kept for backwards compatibility
         const SHOW_ORIGINAL_PLAYER = 2;
         const BROWSER_PLAYERS = 4;
-        const FSONLINE_LINK = 8;
+        const BROWSERS_LINK = 8;
     }
 }
 

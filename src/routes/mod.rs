@@ -10,7 +10,7 @@ use tower_http::services::ServeFile;
 
 use crate::{
     AppState, UsesHttps,
-    contracts::{Imdb, OptionsBytes, Subtitle},
+    contracts::{Imdb, OptionsBytes, PlayerSource, Subtitle},
     custom_extractor::axum_range::{BytesRangeBody, Ranged},
     error::WebResult,
     service::{
@@ -60,7 +60,7 @@ pub struct BehaviourHints {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stream {
-    name: &'static str,
+    name: String,
     title: Arc<str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     url: Option<Arc<str>>,
@@ -79,14 +79,15 @@ impl Stream {
         uses_https: bool,
         host: &str,
         imdb: Imdb,
+        player: PlayerSource,
     ) -> Stream {
         let protocol = if uses_https { "https" } else { "http" };
         Stream {
             subtitles: subtitles
                 .into_iter()
-                .map(|s| Subtitle::new(uses_https, host, s, imdb, &server_name))
+                .map(|s| Subtitle::new(uses_https, host, s, imdb, &server_name, player))
                 .collect(),
-            name: "FSonline local player",
+            name: format!("{player} local player"),
             url: Some(
                 format!("{protocol}://{host}/v1/api/{server_name}/{imdb}/playlist.m3u8").into(),
             ),
@@ -98,9 +99,9 @@ impl Stream {
         }
     }
 
-    fn external_url(external_url: Arc<str>, server_name: &str) -> Stream {
+    fn external_url(external_url: Arc<str>, server_name: &str, player: PlayerSource) -> Stream {
         Stream {
-            name: "FSonline browser player",
+            name: format!("{player} browser player"),
             title: format!("{} Server\nThis will play in the browser", server_name).into(),
             url: None,
             behavior_hints: None,
@@ -109,10 +110,10 @@ impl Stream {
         }
     }
 
-    fn fsonline_url(external_url: Arc<str>) -> Stream {
+    fn browser_url(external_url: Arc<str>, player: PlayerSource) -> Stream {
         Stream {
-            name: "FSonline browser",
-            title: "The fsonline webpage".into(),
+            name: format!("{player} browser"),
+            title: format!("The {player} webpage").into(),
             url: None,
             behavior_hints: None,
             external_url: Some(external_url),
@@ -135,7 +136,7 @@ async fn series_function(
         Some(
             r.players
                 .iter()
-                .map(|r| Stream::external_url(r.iframe_player.clone(), &r.server_name)),
+                .map(|r| Stream::external_url(r.iframe_player.clone(), &r.server_name, r.source)),
         )
     } else {
         None
@@ -152,6 +153,7 @@ async fn series_function(
                 uses_https,
                 &host,
                 imdb_id,
+                r.source,
             ))
         }))
     } else {
@@ -195,13 +197,22 @@ async fn series_function(
         });
     }
 
-    let original_url = if options.contains(OptionsBytes::FSONLINE_LINK) {
-        Some(Stream::fsonline_url(r.fsonline_url.into()))
+    let original_url = if options.contains(OptionsBytes::BROWSERS_LINK) {
+        let browser_urls = [
+            (r.fsonline_url, PlayerSource::Fsonline),
+            (r.filmehd_url, PlayerSource::FilmeHd),
+        ]
+        .into_iter()
+        .flat_map(|(url, source)| Some(Stream::browser_url(url?, source)));
+        Some(browser_urls)
     } else {
         None
     };
 
-    let streams = local_players.chain(original_url).chain(browsers).collect();
+    let streams = local_players
+        .chain(original_url.into_iter().flatten())
+        .chain(browsers)
+        .collect();
     Ok(Json(SeriesResponse { streams }))
 }
 
@@ -244,7 +255,7 @@ async fn subtitles(
             r.data
                 .subtitles
                 .iter()
-                .map(|s| Subtitle::new(uses_https, &host, s, imdb_id, &r.server_name))
+                .map(|s| Subtitle::new(uses_https, &host, s, imdb_id, &r.server_name, r.source))
         })
         .collect();
     Ok(Json(SubtitlesList { subtitles }))

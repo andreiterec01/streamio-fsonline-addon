@@ -29,7 +29,7 @@ impl Item {
         if !forbidden.contains(&mid) {
             return mid;
         }
-        for dir in 1..len.div_ceil(2) {
+        for dir in 1..=len / 2 {
             if let Some(index) = mid.checked_sub(dir)
                 && self.segments.contains(&index)
                 && !forbidden.contains(&index)
@@ -183,5 +183,24 @@ impl<'a> IntervalItem<'a> {
         {
             self.interval.ranges.pop();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Interval;
+
+    #[test]
+    fn next_best_to_split_checks_the_whole_interval_when_midpoint_is_forbidden() {
+        let mut interval = Interval::new(2, 1.0, std::iter::empty(), []);
+
+        let midpoint = interval.next_best_to_split().unwrap();
+        assert_eq!(1, midpoint.index());
+        midpoint.remove();
+
+        assert_eq!(
+            Some(0),
+            interval.next_best_to_split().map(|item| item.index())
+        );
     }
 }

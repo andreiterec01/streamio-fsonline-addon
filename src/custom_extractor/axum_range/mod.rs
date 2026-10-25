@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(54, response.content_length.0);
         assert!(response.content_range.is_none());
         assert_eq!(
-            "Hello world this is a file to test range requests on!\n",
+            "Hello world this is a file to test range requests on1!",
             &collect_stream(response.stream).await
         );
     }
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(Some(expected_content_range), response.content_range);
 
         assert_eq!(
-            "test range requests on!\n",
+            "test range requests on1!",
             &collect_stream(response.stream).await
         );
     }
@@ -387,7 +387,7 @@ mod tests {
         assert_eq!(Some(expected_content_range), response.content_range);
 
         assert_eq!(
-            " range requests on!\n",
+            " range requests on1!",
             &collect_stream(response.stream).await
         );
     }
@@ -403,7 +403,7 @@ mod tests {
         let expected_content_range = ContentRange::bytes(40..54, 54).unwrap();
         assert_eq!(Some(expected_content_range), response.content_range);
 
-        assert_eq!(" requests on!\n", &collect_stream(response.stream).await);
+        assert_eq!(" requests on1!", &collect_stream(response.stream).await);
     }
 
     #[tokio::test]
@@ -443,7 +443,7 @@ mod tests {
         assert_eq!(Some(expected_content_range), response.content_range);
 
         assert_eq!(
-            "test range requests on!\n",
+            "test range requests on1!",
             &collect_stream(response.stream).await
         );
     }

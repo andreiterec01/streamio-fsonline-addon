@@ -1,8 +1,8 @@
 {
     "id": "org.stremio.fsonline",
-    "version": "3.0.0",
+    "version": "3.0.1",
     "name": "FSonline",
-    "description": "Watch movies, series and get subtitles from fsonline servers",
+    "description": "Watch movies, series and get subtitles from fsonline and filmehd servers",
     "resources": [
         "stream",
         "subtitles"
