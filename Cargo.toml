@@ -12,7 +12,6 @@ axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 base64 = "0.23.1"
 bitflags = { version = "2.13.0", features = ["std"] }
 bytes = "1.12.0"
-chromiumoxide = "0.9.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive", "env"] }
 crossbeam = "0.8.5"

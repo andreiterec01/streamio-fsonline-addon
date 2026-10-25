@@ -73,12 +73,13 @@ async fn main() -> anyhow::Result<()> {
     };
     let client = reqwest::Client::new();
 
-    let browser = crate::service::scrappers::browser_discovery_scrapper::BrowserDiscovery::new(
-        args.headless_browser,
-    )
-    .await?;
+    // removed for now, as this doesn't help with discovering new players
+    // let browser = crate::service::scrappers::browser_discovery_scrapper::BrowserDiscovery::new(
+    //     args.headless_browser,
+    // )
+    // .await?;
 
-    let mut scrappers = PlayerScrappers::new(client.clone(), browser);
+    let mut scrappers = PlayerScrappers::new(client.clone());
     scrappers.add_scrapper(VidmolyScrapper::new(client.clone()));
     scrappers.add_scrapper(FileSuN::new(client.clone()));
     scrappers.add_scrapper(Voe::new(client.clone()));

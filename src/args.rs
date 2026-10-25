@@ -8,8 +8,6 @@ pub struct Args {
     pub(crate) ssl_key_path: Option<PathBuf>,
     #[clap(long, env)]
     pub(crate) ssl_cert_path: Option<PathBuf>,
-    #[clap(long, env)]
-    pub(crate) headless_browser: bool,
     /// The host where this server is hosted. Used for redirecting subtitles
     #[clap(long, env)]
     pub(crate) host: String,

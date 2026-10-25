@@ -8,20 +8,19 @@ use crate::{
     contracts::PlayerOption,
     service::fsonline_service::{VideoAndSubtitles, VideoAndSubtitlesScrapper},
 };
-pub mod browser_discovery_scrapper;
+// Removed for now, as this doesn't help with discovering new players
+// pub mod browser_discovery_scrapper;
 pub mod file_sun;
 pub mod vidmoly;
 pub mod voe;
 pub struct PlayerScrappers {
-    default_scrapper: PlayerScrapperBox,
     specific_scrapper: HashMap<String, PlayerScrapperBox>,
     client: reqwest::Client,
 }
 
 impl PlayerScrappers {
-    pub fn new(client: reqwest::Client, default_scrapper: impl PlayerScrapper + 'static) -> Self {
+    pub fn new(client: reqwest::Client) -> Self {
         Self {
-            default_scrapper: Box::new(default_scrapper),
             specific_scrapper: HashMap::new(),
             client,
         }
@@ -39,10 +38,12 @@ impl PlayerScrappers {
     }
 
     pub async fn get_video(&self, player: &PlayerOption) -> anyhow::Result<VideoAndSubtitles> {
-        let scrapper = self
+        let Some(scrapper) = self
             .specific_scrapper
             .get(&player.server_name.to_lowercase())
-            .unwrap_or(&self.default_scrapper);
+        else {
+            return Ok(VideoAndSubtitles::default());
+        };
         let VideoAndSubtitlesScrapper {
             m3u8_url,
             subtitles,
