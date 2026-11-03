@@ -286,7 +286,7 @@ async fn redirect_subtitles(
         .find(|s| s.md5() == md5)
         .context("Failed to find the language requested")?;
 
-    let bytes = client
+    let response = client
         .get(subtitle.url.deref())
         .send()
         .await
@@ -298,11 +298,11 @@ async fn redirect_subtitles(
         .map_err(anyhow::Error::from)?;
     // TODO: add to cache
 
-    // let subtitle = movie.replace_subtitle_caracters(&response);
-    // drop(response);
+    let bytes = movie.replace_subtitle_caracters(&response);
+    drop(response);
 
-    // let subtitle = axum::body::Bytes::from(subtitle);
-    let subtitle = BytesRangeBody(bytes);
+    let subtitle = axum::body::Bytes::from(bytes);
+    let subtitle = BytesRangeBody(subtitle);
     let range = range.map(|TypedHeader(range)| range);
 
     let headers: hyper::HeaderMap = [(

@@ -1,5 +1,6 @@
 use std::{ops::Deref, sync::Arc};
 
+use aho_corasick::AhoCorasick;
 use m3u8_rs::MediaPlaylist;
 
 use crate::{
@@ -50,28 +51,35 @@ pub struct SegmentInfo {
 pub struct ImdbToVideoServer {
     video_service: VideoServer,
     imdb_service: ImdbService,
-    // aho_corasik_subtitles: AhoCorasick,
+    aho_corasik_subtitles: AhoCorasick,
 }
 
 impl ImdbToVideoServer {
     pub fn new(video_service: VideoServer, imdb_service: ImdbService) -> Self {
-        // let aho_corasik_subtitles =
-        //     AhoCorasick::new(["&lrm;", "&rlm;", "&nbsp;", "&amp;", "&lt;", "&gt;"]).unwrap();
+        let aho_corasik_subtitles =
+            AhoCorasick::new(["&lrm;", "&rlm;", "&nbsp;", "&amp;", "&lt;", "&gt;"]).unwrap();
 
         Self {
             imdb_service,
             video_service,
-            // aho_corasik_subtitles,
+            aho_corasik_subtitles,
         }
     }
 
     // TODO: move this function to a subtitle service
-    // pub fn replace_subtitle_caracters(&self, subtitle: &[u8]) -> String {
-    //     self.aho_corasik_subtitles.replace_all_bytes(
-    //         subtitle,
-    //         &[b"\u{200E}", b"\u{200F}", b"\u{00A0}", b"&", b"<", b">"],
-    //     )
-    // }
+    pub fn replace_subtitle_caracters(&self, subtitle: &[u8]) -> Vec<u8> {
+        self.aho_corasik_subtitles.replace_all_bytes(
+            subtitle,
+            &[
+                "\u{200E}".as_bytes(),
+                "\u{200F}".as_bytes(),
+                "\u{00A0}".as_bytes(),
+                b"&",
+                b"<",
+                b">",
+            ],
+        )
+    }
 
     pub async fn get(&self, imdb_id: Imdb) -> anyhow::Result<VideoServerResponse> {
         let MovieData {
