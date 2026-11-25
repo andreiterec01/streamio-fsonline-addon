@@ -55,7 +55,7 @@ impl Subtitle {
         let protocol = if uses_https { "https" } else { "http" };
         let id = fsonline_subtitle.md5();
         Self {
-            id: format!("{source} {server_name}"),
+            id: id.to_string(),
             label: format!("{source} {server_name}"),
             url: format!(
                 "{protocol}://{host}/v1/api/subtitles/{imdb}/{}/subtitle.vtt",

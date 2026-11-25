@@ -26,13 +26,15 @@ pub fn routes() -> Router<AppState> {
         .route_service("/{options}/manifest.json", ServeFile::new(r"manifest.json"))
         .route("/{options}/stream/series/{imdb_id}", get(series))
         .route("/{options}/stream/movie/{imdb_id}", get(series))
+        .route("/{options}/subtitles/series/{imdb_id}", get(subtitles))
+        .route("/{options}/subtitles/movie/{imdb_id}", get(subtitles))
         .route(
             "/{options}/subtitles/series/{imdb_id}/{filename}",
-            get(subtitles),
+            get(subtitles_with_filename),
         )
         .route(
             "/{options}/subtitles/movie/{imdb_id}/{filename}",
-            get(subtitles),
+            get(subtitles_with_filename),
         )
         .route(
             "/v1/api/subtitles/{imdb}/{md5}/subtitle.vtt",
@@ -55,6 +57,8 @@ pub struct SeriesResponse {
 #[serde(rename_all = "camelCase")]
 pub struct BehaviourHints {
     not_web_ready: bool,
+    binge_group: String,
+    filename: String,
 }
 
 #[derive(Serialize)]
@@ -68,7 +72,6 @@ pub struct Stream {
     behavior_hints: Option<BehaviourHints>,
     #[serde(skip_serializing_if = "Option::is_none")]
     external_url: Option<Arc<str>>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     subtitles: Vec<Subtitle>,
 }
 
@@ -91,10 +94,12 @@ impl Stream {
             url: Some(
                 format!("{protocol}://{host}/v1/api/{server_name}/{imdb}/playlist.m3u8").into(),
             ),
-            title: server_name,
             behavior_hints: Some(BehaviourHints {
                 not_web_ready: true,
+                binge_group: format!("fsonline/{server_name}"),
+                filename: format!("{server_name}-{imdb}.m3u8"),
             }),
+            title: server_name,
             external_url: None,
         }
     }
@@ -243,9 +248,8 @@ async fn subtitles(
     State(movie): State<ImdbToVideoServer>,
     State(UsesHttps(uses_https)): State<UsesHttps>,
     State(crate::Host(host)): State<crate::Host>,
-    Path((_, imdb_id, filename)): Path<(OptionsBytes, Imdb, String)>,
+    Path((_, imdb_id)): Path<(OptionsBytes, Imdb)>,
 ) -> WebResult<Json<SubtitlesList>> {
-    tracing::info!("Subtitle filename is {filename}");
     let r = movie.get(imdb_id).await?;
 
     let subtitles = r
@@ -259,6 +263,15 @@ async fn subtitles(
         })
         .collect();
     Ok(Json(SubtitlesList { subtitles }))
+}
+
+async fn subtitles_with_filename(
+    movie: State<ImdbToVideoServer>,
+    uses_https: State<UsesHttps>,
+    host: State<crate::Host>,
+    Path((options, imdb_id, _)): Path<(OptionsBytes, Imdb, String)>,
+) -> WebResult<Json<SubtitlesList>> {
+    subtitles(movie, uses_https, host, Path((options, imdb_id))).await
 }
 
 #[derive(Deserialize)]
